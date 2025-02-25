@@ -46,13 +46,20 @@ def attachment_download(
     file_name_manifest_dict: Dict[str, BaseAssetManifest] = _read_manifests(
         manifest_paths=manifests
     )
+    _attachment_download_with_root_manifests(
+        boto3_session, file_name_manifest_dict, logger, path_mapping_rules, s3_root_uri
+    )
+
+
+def _attachment_download_with_root_manifests(
+    boto3_session, manifests_by_root, logger, path_mapping_rules, s3_root_uri
+):
     path_mapping_rule_list: List[PathMappingRule] = _process_path_mapping(
         path_mapping_rules=path_mapping_rules
     )
-
     merged_manifests_by_root: Dict[str, BaseAssetManifest] = dict()
-    for file_name in file_name_manifest_dict:
-        manifest: BaseAssetManifest = file_name_manifest_dict[file_name]
+    for file_name in manifests_by_root:
+        manifest: BaseAssetManifest = manifests_by_root[file_name]
         # File name is supposed to be prefixed by a hash of source path in path mapping, use that to determine destination
         # If it doesn't appear in path mapping or mapping doesn't exist, download to current directory instead
         destination = next(
@@ -67,11 +74,10 @@ def attachment_download(
         # Assuming the manifest is already aggregated and correspond to a single destination
         if merged_manifests_by_root.get(destination):
             raise NonValidInputError(
-                f"{destination} is already in use, one desination path maps to one manifest file only."
+                f"{destination} is already in use, one destination path maps to one manifest file only."
             )
 
         merged_manifests_by_root[destination] = manifest
-
     # Given manifests and S3 bucket + root, downloads all files from a CAS in each manifest.
     s3_settings: JobAttachmentS3Settings = JobAttachmentS3Settings.from_s3_root_uri(s3_root_uri)
     download_summary: DownloadSummaryStatistics = download_files_from_manifests(

@@ -25,6 +25,7 @@ __all__ = [
     "get_storage_profile_for_queue",
     "record_success_fail_telemetry_event",
     "record_function_latency_telemetry_event",
+    "_incremental_output_download",
 ]
 
 # The following import is needed to prevent the following sporadic failure:
@@ -68,6 +69,7 @@ from ._submit_job_bundle import (
     wait_for_create_job_to_complete,
 )
 from ._get_storage_profile_for_queue import get_storage_profile_for_queue
+from ._queue_apis import _incremental_output_download
 
 logger = getLogger(__name__)
 
