@@ -214,12 +214,9 @@ def assert_download_task_output(
             on_downloading_files=mock_on_downloading_files,
         )
 
-    # Ensure that only the expected files are there and no extras.
-    expected_files_set = set().union(*expected_files.values())
-    assert expected_files_set == set([path for path in tmp_path.glob("**/*") if path.is_file()])
-    # Ensure that all the files from the 2023-03-03 manifest have had the correct mtime set.
-    if manifest_version == ManifestVersion.v2023_03_03:
-        assert all(path.stat().st_mtime == 1234 for path in tmp_path.glob("**/*") if path.is_file())
+    check_expected_files_present(expected_files, tmp_path)
+
+    check_manifest_version_v2023_mtime(manifest_version, tmp_path)
 
     assert_progress_tracker_values(
         manifest_version=manifest_version,
@@ -228,6 +225,12 @@ def assert_download_task_output(
         expected_total_bytes=expected_total_bytes,
         mock_on_downloading_files=mock_on_downloading_files,
     )
+
+
+def check_manifest_version_v2023_mtime(manifest_version, tmp_path):
+    # Ensure that all the files from the 2023-03-03 manifest have had the correct mtime set.
+    if manifest_version == ManifestVersion.v2023_03_03:
+        assert all(path.stat().st_mtime == 1234 for path in tmp_path.glob("**/*") if path.is_file())
 
 
 def assert_download_step_output(
@@ -261,12 +264,9 @@ def assert_download_step_output(
             on_downloading_files=mock_on_downloading_files,
         )
 
-    # Ensure that only the expected files are there and no extras.
-    expected_files_set = set().union(*expected_files.values())
-    assert expected_files_set == set([path for path in tmp_path.glob("**/*") if path.is_file()])
-    # Ensure that all the files from the 2023-03-03 manifest have had the correct mtime set.
-    if manifest_version == ManifestVersion.v2023_03_03:
-        assert all(path.stat().st_mtime == 1234 for path in tmp_path.glob("**/*") if path.is_file())
+    check_expected_files_present(expected_files, tmp_path)
+
+    check_manifest_version_v2023_mtime(manifest_version, tmp_path)
 
     assert_progress_tracker_values(
         manifest_version=manifest_version,
@@ -310,9 +310,7 @@ def assert_download_job_output(
     # Ensure that only the expected files are there and no extras.
     expected_files_set = set().union(*expected_files.values())
     assert expected_files_set == set([path for path in tmp_path.glob("**/*") if path.is_file()])
-    # Ensure that all the files from the 2023-03-03 manifest have had the correct mtime set.
-    if manifest_version == ManifestVersion.v2023_03_03:
-        assert all(path.stat().st_mtime == 1234 for path in tmp_path.glob("**/*") if path.is_file())
+    check_manifest_version_v2023_mtime(manifest_version, tmp_path)
 
     assert_progress_tracker_values(
         manifest_version=manifest_version,
@@ -354,9 +352,7 @@ def assert_download_files_in_directory(
             on_downloading_files=mock_on_downloading_files,
         )
 
-    # Ensure that only the expected files are there and no extras.
-    expected_files_set = set().union(*expected_files.values())
-    assert expected_files_set == set([path for path in tmp_path.glob("**/*") if path.is_file()])
+    check_expected_files_present(expected_files, tmp_path)
 
     assert_progress_tracker_values(
         manifest_version=manifest_version,
@@ -365,6 +361,12 @@ def assert_download_files_in_directory(
         expected_total_bytes=expected_total_bytes,
         mock_on_downloading_files=mock_on_downloading_files,
     )
+
+
+def check_expected_files_present(expected_files, tmp_path):
+    # Ensure that only the expected files are there and no extras.
+    expected_files_set = set().union(*expected_files.values())
+    assert expected_files_set == set([path for path in tmp_path.glob("**/*") if path.is_file()])
 
 
 def assert_progress_tracker_values(
@@ -1297,41 +1299,8 @@ class TestFullDownload:
         `st_ctime` represents the time of the last metadata change, but on Windows, it represents
         the file creation time. So the skipping verification is only available on Linux.
         """
-        expected_files = [
-            tmp_path / "test1.txt",
-            tmp_path / "test" / "test2.txt",
-            tmp_path / "test" / "test3.txt",
-            tmp_path / "test4.txt",
-            tmp_path / "test13.txt",
-            tmp_path / "test" / "test14.txt",
-            tmp_path / "test5.txt",
-            tmp_path / "test" / "test6.txt",
-            tmp_path / "test7.txt",
-            tmp_path / "test" / "test8.txt",
-            tmp_path / "test" / "test9.txt",
-            tmp_path / "test10.txt",
-            tmp_path / "test11.txt",
-            tmp_path / "test" / "test12.txt",
-        ]
-
-        with patch(
-            f"{deadline.__package__}.job_attachments.download._get_asset_root_from_s3",
-            return_value=str(tmp_path.resolve()),
-        ):
-            output_downloader = OutputDownloader(
-                s3_settings=self.job_attachment_settings,
-                farm_id=farm_id,
-                queue_id=queue_id,
-                job_id="job-1",
-                step_id=None,
-                task_id=None,
-            )
-
-        # First download the files and check if the files are there.
-        # (Ensure that only the expected files are there and no extras.)
-        output_downloader.download_job_output()
-        assert set(expected_files) == set(
-            [path for path in tmp_path.glob("**/*") if path.is_file()]
+        expected_files, output_downloader = self.download_outputs_check_expected_files_exist(
+            farm_id, queue_id, tmp_path
         )
         # Record the last metadata modification times for each file.
         modified_time_before_second_trial = [path.stat().st_ctime for path in expected_files]
@@ -1349,16 +1318,7 @@ class TestFullDownload:
             modified_time_after_second_trial = [path.stat().st_ctime for path in expected_files]
             assert modified_time_before_second_trial == modified_time_after_second_trial
 
-    def test_OutputDownloader_download_job_output_when_overwrite(
-        self, farm_id, queue_id, tmp_path: Path
-    ):
-        """
-        When path conflicts occur during file download and the resolution method is set to OVERWRITE,
-        test whether the files has actually been overwritten.
-        Note: This test relies on `st_ctime` for checking if a file has been overwritten. On Linux,
-        `st_ctime` represents the time of the last metadata change, but on Windows, it represents
-        the file creation time. So the overwriting verification is only available on Linux.
-        """
+    def download_outputs_check_expected_files_exist(self, farm_id, queue_id, tmp_path):
         expected_files = [
             tmp_path / "test1.txt",
             tmp_path / "test" / "test2.txt",
@@ -1375,7 +1335,6 @@ class TestFullDownload:
             tmp_path / "test11.txt",
             tmp_path / "test" / "test12.txt",
         ]
-
         with patch(
             f"{deadline.__package__}.job_attachments.download._get_asset_root_from_s3",
             return_value=str(tmp_path.resolve()),
@@ -1388,12 +1347,26 @@ class TestFullDownload:
                 step_id=None,
                 task_id=None,
             )
-
         # First download the files and check if the files are there.
         # (Ensure that only the expected files are there and no extras.)
         output_downloader.download_job_output()
         assert set(expected_files) == set(
             [path for path in tmp_path.glob("**/*") if path.is_file()]
+        )
+        return expected_files, output_downloader
+
+    def test_OutputDownloader_download_job_output_when_overwrite(
+        self, farm_id, queue_id, tmp_path: Path
+    ):
+        """
+        When path conflicts occur during file download and the resolution method is set to OVERWRITE,
+        test whether the files has actually been overwritten.
+        Note: This test relies on `st_ctime` for checking if a file has been overwritten. On Linux,
+        `st_ctime` represents the time of the last metadata change, but on Windows, it represents
+        the file creation time. So the overwriting verification is only available on Linux.
+        """
+        expected_files, output_downloader = self.download_outputs_check_expected_files_exist(
+            farm_id, queue_id, tmp_path
         )
         # Record the last metadata modification times for each file.
         modified_time_before_overwrite = [path.stat().st_ctime for path in expected_files]
@@ -1599,6 +1572,9 @@ class TestFullDownload:
     def test_OutputDownloader_download_job_output_posix_invalid_file_path_fails(
         self, farm_id, queue_id, outputs_by_root: dict[str, ManifestPathGroup]
     ):
+        self.create_output_downloaded_and_validate_path(farm_id, outputs_by_root, queue_id)
+
+    def create_output_downloaded_and_validate_path(self, farm_id, outputs_by_root, queue_id):
         with patch(
             f"{deadline.__package__}.job_attachments.download.get_job_output_paths_by_asset_root",
             return_value=outputs_by_root,
@@ -1674,22 +1650,7 @@ class TestFullDownload:
     def test_OutputDownloader_download_job_output_windows_invalid_file_path_fails(
         self, farm_id, queue_id, outputs_by_root: dict[str, ManifestPathGroup]
     ):
-        with patch(
-            f"{deadline.__package__}.job_attachments.download.get_job_output_paths_by_asset_root",
-            return_value=outputs_by_root,
-        ):
-            output_downloader = OutputDownloader(
-                s3_settings=self.job_attachment_settings,
-                farm_id=farm_id,
-                queue_id=queue_id,
-                job_id="job-1",
-                step_id=None,
-                task_id=None,
-            )
-        with patch(
-            f"{deadline.__package__}.job_attachments.download.download_files", return_value=[]
-        ), pytest.raises((PathOutsideDirectoryError, ValueError)):
-            output_downloader.download_job_output()
+        self.create_output_downloaded_and_validate_path(farm_id, outputs_by_root, queue_id)
 
     def test_get_asset_root_from_s3_error_message_on_not_found(self):
         """
@@ -1970,6 +1931,24 @@ class TestFullDownload:
 
         local_path = "Users/path/to/a/very/long/file/path/that/exceeds/the/windows/max/path/length/for/testing/max/file/path/error/handling/when/download/or/syncing/assest/using/job/attachment"
 
+        self.download_file_and_check_exception(
+            file_path,
+            local_path,
+            mock_collision_dict,
+            mock_lock,
+            mock_s3_client,
+            mock_transfer_manager,
+        )
+
+    def download_file_and_check_exception(
+        self,
+        file_path,
+        local_path,
+        mock_collision_dict,
+        mock_lock,
+        mock_s3_client,
+        mock_transfer_manager,
+    ):
         with patch(
             f"{deadline.__package__}.job_attachments.download.get_s3_client",
             return_value=mock_s3_client,
@@ -1988,7 +1967,6 @@ class TestFullDownload:
                     "rootPrefix/Data",
                     mock_s3_client,
                 )
-
         expected_message = "Test exception"
         assert str(exc.value) == expected_message
         mock_lock.assert_not_called()
@@ -2016,50 +1994,28 @@ class TestFullDownload:
 
         local_path = "C:\\path\\to\\a\\very\\long\\file\\path\\that\\exceeds\\the\\windows\\max\\path\\length\\for\\testing\\max\\file\\path\\error\\handling\\when\\download\\or\\syncing\\assest\\using\\job\\attachment"
 
-        with patch(
-            f"{deadline.__package__}.job_attachments.download.get_s3_client",
-            return_value=mock_s3_client,
-        ), patch(
-            f"{deadline.__package__}.job_attachments.download.get_s3_transfer_manager",
-            return_value=mock_transfer_manager,
-        ), patch(f"{deadline.__package__}.job_attachments.download.Path.mkdir"):
-            with pytest.raises(AssetSyncError) as exc:
-                download_file(
-                    file_path,
-                    HashAlgorithm.XXH128,
-                    local_path,
-                    mock_lock,
-                    mock_collision_dict,
-                    "test-bucket",
-                    "rootPrefix/Data",
-                    mock_s3_client,
-                )
-        expected_message = "Test exception"
-        assert str(exc.value) == expected_message
-        mock_lock.assert_not_called()
-        mock_collision_dict.assert_not_called()
+        self.download_file_and_check_exception(
+            file_path,
+            local_path,
+            mock_collision_dict,
+            mock_lock,
+            mock_s3_client,
+            mock_transfer_manager,
+        )
 
     @pytest.mark.skipif(
         sys.platform != "win32",
         reason="This test is for Windows path only.",
     )
     def test_windows_long_path_UNC_notation_WindowsOS(self):
-        mock_s3_client = MagicMock()
-        mock_future = MagicMock()
-        mock_transfer_manager = MagicMock()
-        mock_transfer_manager.download.return_value = mock_future
-        mock_future.result.side_effect = Exception("Test exception")
-        mock_lock = MagicMock()
-        mock_collision_dict = MagicMock()
-
-        file_path = ManifestPathv2023_03_03(
-            path="very/long/input/to/test/windows/max/file/path/for/error/handling/when/downloading/assest/from/job/attachment.txt",
-            hash="path",
-            size=1,
-            mtime=1234000000,
-        )
-
-        local_path = "\\\\?\\C:\\path\\to\\a\\very\\long\\file\\path\\that\\exceeds\\the\\windows\\max\\path\\length\\for\\testing\\max\\file\\path\\error\\handling\\when\\download\\or\\syncing\\assest\\using\\job\\attachment"
+        (
+            file_path,
+            local_path,
+            mock_collision_dict,
+            mock_lock,
+            mock_s3_client,
+            mock_transfer_manager,
+        ) = self.setup_mocks_and_file_path()
 
         with patch(
             f"{deadline.__package__}.job_attachments.download.get_s3_client",
@@ -2087,11 +2043,7 @@ class TestFullDownload:
         mock_lock.assert_not_called()
         mock_collision_dict.assert_not_called()
 
-    @pytest.mark.skipif(
-        sys.platform != "win32",
-        reason="This test is for Windows path only.",
-    )
-    def test_windows_long_path_UNC_notation_and_registry_WindowsOS(self):
+    def setup_mocks_and_file_path(self):
         mock_s3_client = MagicMock()
         mock_future = MagicMock()
         mock_transfer_manager = MagicMock()
@@ -2099,15 +2051,35 @@ class TestFullDownload:
         mock_future.result.side_effect = Exception("Test exception")
         mock_lock = MagicMock()
         mock_collision_dict = MagicMock()
-
         file_path = ManifestPathv2023_03_03(
             path="very/long/input/to/test/windows/max/file/path/for/error/handling/when/downloading/assest/from/job/attachment.txt",
             hash="path",
             size=1,
             mtime=1234000000,
         )
-
         local_path = "\\\\?\\C:\\path\\to\\a\\very\\long\\file\\path\\that\\exceeds\\the\\windows\\max\\path\\length\\for\\testing\\max\\file\\path\\error\\handling\\when\\download\\or\\syncing\\assest\\using\\job\\attachment"
+        return (
+            file_path,
+            local_path,
+            mock_collision_dict,
+            mock_lock,
+            mock_s3_client,
+            mock_transfer_manager,
+        )
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="This test is for Windows path only.",
+    )
+    def test_windows_long_path_UNC_notation_and_registry_WindowsOS(self):
+        (
+            file_path,
+            local_path,
+            mock_collision_dict,
+            mock_lock,
+            mock_s3_client,
+            mock_transfer_manager,
+        ) = self.setup_mocks_and_file_path()
 
         with patch(
             f"{deadline.__package__}.job_attachments.download.get_s3_client",

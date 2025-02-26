@@ -324,11 +324,17 @@ def _get_new_copy_file_path(
         new_file_name = local_file_name
 
         # Iterate until we find a number we don't conflict with
-        while new_file_name.is_file():
-            num += 1
-            new_file_name = local_file_name.parent.joinpath(
-                f"{local_file_name.stem} ({num}){local_file_name.suffix}"
-            )
+        while True:
+            try:
+                # Handle multi-process locks with creating and/or opening file to verify if it exists
+                with open(new_file_name, "x"):
+                    break
+            # If file exists we go here and increment num to find a unique path
+            except FileExistsError:
+                num += 1
+                new_file_name = local_file_name.parent.joinpath(
+                    f"{local_file_name.stem} ({num}){local_file_name.suffix}"
+                )
 
         collision_file_dict[file_str] = num
         local_file_name = new_file_name
