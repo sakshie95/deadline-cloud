@@ -14,7 +14,8 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-from typing import Any, Callable, List
+from threading import Lock
+from typing import Any, Callable, DefaultDict, List
 from unittest.mock import MagicMock, call, patch
 
 import boto3
@@ -47,6 +48,7 @@ from deadline.job_attachments.download import (
     merge_asset_manifests,
     _ensure_paths_within_directory,
     _get_asset_root_from_s3,
+    _get_new_copy_file_path,
     _get_tasks_manifests_keys_from_s3,
     VFS_CACHE_REL_PATH_IN_SESSION,
     VFS_MANIFEST_FOLDER_IN_SESSION,
@@ -158,11 +160,9 @@ MANIFESTS_v2022_03_03: List[Manifest] = [
     ),
 ]
 
-
 MANIFEST_VERSION_TO_MANIFESTS: dict[ManifestVersion, List[Manifest]] = {
     ManifestVersion.v2023_03_03: MANIFESTS_v2022_03_03,
 }
-
 
 INPUT_ASSET_MANIFESTS_V2023_03_03: List[Manifest] = [
     Manifest(
@@ -177,7 +177,6 @@ INPUT_ASSET_MANIFESTS_V2023_03_03: List[Manifest] = [
         b'"totalSize":5}',
     ),
 ]
-
 
 MANIFEST_VERSION_TO_INPUT_ASSET_MANIFESTS: dict[ManifestVersion, List[Manifest]] = {
     ManifestVersion.v2023_03_03: INPUT_ASSET_MANIFESTS_V2023_03_03,
@@ -1713,7 +1712,8 @@ class TestFullDownload:
                 _get_asset_root_from_s3("not/existed/test.txt", "test-bucket")
             assert isinstance(err.value.__cause__, ClientError)
             assert (
-                err.value.__cause__.response["ResponseMetadata"]["HTTPStatusCode"] == 404  # type: ignore[attr-defined]
+                err.value.__cause__.response["ResponseMetadata"]["HTTPStatusCode"] == 404
+                # type: ignore[attr-defined]
             )
             assert (
                 "Error checking if object exists in bucket 'test-bucket', Target key or prefix: 'not/existed/test.txt', "
@@ -1764,7 +1764,8 @@ class TestFullDownload:
                 get_manifest_from_s3("test-key", "test-bucket")
             assert isinstance(exc.value.__cause__, ClientError)
             assert (
-                exc.value.__cause__.response["ResponseMetadata"]["HTTPStatusCode"] == 403  # type: ignore[attr-defined]
+                exc.value.__cause__.response["ResponseMetadata"]["HTTPStatusCode"] == 403
+                # type: ignore[attr-defined]
             )
             assert (
                 "Error downloading binary file in bucket 'test-bucket', Target key or prefix: 'test-key', "
@@ -1818,7 +1819,8 @@ class TestFullDownload:
                 )
             assert isinstance(exc.value.__cause__, ClientError)
             assert (
-                exc.value.__cause__.response["ResponseMetadata"]["HTTPStatusCode"] == 403  # type: ignore[attr-defined]
+                exc.value.__cause__.response["ResponseMetadata"]["HTTPStatusCode"] == 403
+                # type: ignore[attr-defined]
             )
             assert (
                 "Error listing bucket contents in bucket 'test-bucket', Target key or prefix: 'assetRoot', "
@@ -1865,6 +1867,9 @@ class TestFullDownload:
             http_status_code=403,
         )
 
+        mock_lock = MagicMock()
+        mock_collision_dict = MagicMock()
+
         file_path = ManifestPathv2023_03_03(
             path="inputs/input1.txt", hash="input1", size=1, mtime=1234000000
         )
@@ -1877,13 +1882,16 @@ class TestFullDownload:
                     file_path,
                     HashAlgorithm.XXH128,
                     "/home/username/assets",
+                    mock_lock,
+                    mock_collision_dict,
                     "test-bucket",
                     "rootPrefix/Data",
                     s3_client,
                 )
             assert isinstance(exc.value.__cause__, ClientError)
             assert (
-                exc.value.__cause__.response["ResponseMetadata"]["HTTPStatusCode"] == 403  # type: ignore[attr-defined]
+                exc.value.__cause__.response["ResponseMetadata"]["HTTPStatusCode"] == 403
+                # type: ignore[attr-defined]
             )
             assert (
                 "Error downloading file in bucket 'test-bucket', Target key or prefix: 'rootPrefix/Data/input1.xxh128', "
@@ -1891,6 +1899,8 @@ class TestFullDownload:
             ) in str(exc.value)
             failed_file_path = Path("/home/username/assets/inputs/input1.txt")
             assert (f"(Failed to download the file to {str(failed_file_path)})") in str(exc.value)
+            mock_lock.assert_not_called()
+            mock_collision_dict.assert_not_called()
 
     def test_download_file_error_message_on_timeout(self):
         """
@@ -1902,6 +1912,8 @@ class TestFullDownload:
         mock_transfer_manager = MagicMock()
         mock_transfer_manager.download.return_value = mock_future
         mock_future.result.side_effect = ReadTimeoutError(endpoint_url="test_url")
+        mock_lock = MagicMock()
+        mock_collision_dict = MagicMock()
 
         file_path = ManifestPathv2023_03_03(
             path="inputs/input1.txt", hash="input1", size=1, mtime=1234000000
@@ -1919,6 +1931,8 @@ class TestFullDownload:
                     file_path,
                     HashAlgorithm.XXH128,
                     "/home/username/assets",
+                    mock_lock,
+                    mock_collision_dict,
                     "test-bucket",
                     "rootPrefix/Data",
                     mock_s3_client,
@@ -1931,6 +1945,8 @@ class TestFullDownload:
                 "Please verify your credentials and network connection. If the problem persists, try again later"
                 " or contact support for further assistance."
             ) in str(exc.value)
+            mock_lock.assert_not_called()
+            mock_collision_dict.assert_not_called()
 
     @pytest.mark.skipif(
         sys.platform == "win32",
@@ -1942,6 +1958,8 @@ class TestFullDownload:
         mock_transfer_manager = MagicMock()
         mock_transfer_manager.download.return_value = mock_future
         mock_future.result.side_effect = Exception("Test exception")
+        mock_lock = MagicMock()
+        mock_collision_dict = MagicMock()
 
         file_path = ManifestPathv2023_03_03(
             path="very/long/input/to/test/windows/max/file/path/for/error/handling/when/downloading/assest/from/job/attachment.txt",
@@ -1964,6 +1982,8 @@ class TestFullDownload:
                     file_path,
                     HashAlgorithm.XXH128,
                     local_path,
+                    mock_lock,
+                    mock_collision_dict,
                     "test-bucket",
                     "rootPrefix/Data",
                     mock_s3_client,
@@ -1971,6 +1991,8 @@ class TestFullDownload:
 
         expected_message = "Test exception"
         assert str(exc.value) == expected_message
+        mock_lock.assert_not_called()
+        mock_collision_dict.assert_not_called()
 
     @pytest.mark.skipif(
         sys.platform != "win32",
@@ -1982,6 +2004,8 @@ class TestFullDownload:
         mock_transfer_manager = MagicMock()
         mock_transfer_manager.download.return_value = mock_future
         mock_future.result.side_effect = Exception("Test exception")
+        mock_lock = MagicMock()
+        mock_collision_dict = MagicMock()
 
         file_path = ManifestPathv2023_03_03(
             path="very/long/input/to/test/windows/max/file/path/for/error/handling/when/downloading/assest/from/job/attachment.txt",
@@ -2004,12 +2028,16 @@ class TestFullDownload:
                     file_path,
                     HashAlgorithm.XXH128,
                     local_path,
+                    mock_lock,
+                    mock_collision_dict,
                     "test-bucket",
                     "rootPrefix/Data",
                     mock_s3_client,
                 )
         expected_message = "Test exception"
         assert str(exc.value) == expected_message
+        mock_lock.assert_not_called()
+        mock_collision_dict.assert_not_called()
 
     @pytest.mark.skipif(
         sys.platform != "win32",
@@ -2021,6 +2049,8 @@ class TestFullDownload:
         mock_transfer_manager = MagicMock()
         mock_transfer_manager.download.return_value = mock_future
         mock_future.result.side_effect = Exception("Test exception")
+        mock_lock = MagicMock()
+        mock_collision_dict = MagicMock()
 
         file_path = ManifestPathv2023_03_03(
             path="very/long/input/to/test/windows/max/file/path/for/error/handling/when/downloading/assest/from/job/attachment.txt",
@@ -2046,12 +2076,16 @@ class TestFullDownload:
                     file_path,
                     HashAlgorithm.XXH128,
                     local_path,
+                    mock_lock,
+                    mock_collision_dict,
                     "test-bucket",
                     "rootPrefix/Data",
                     mock_s3_client,
                 )
         expected_message = "Test exception"
         assert str(exc.value) == expected_message
+        mock_lock.assert_not_called()
+        mock_collision_dict.assert_not_called()
 
     @pytest.mark.skipif(
         sys.platform != "win32",
@@ -2063,6 +2097,8 @@ class TestFullDownload:
         mock_transfer_manager = MagicMock()
         mock_transfer_manager.download.return_value = mock_future
         mock_future.result.side_effect = Exception("Test exception")
+        mock_lock = MagicMock()
+        mock_collision_dict = MagicMock()
 
         file_path = ManifestPathv2023_03_03(
             path="very/long/input/to/test/windows/max/file/path/for/error/handling/when/downloading/assest/from/job/attachment.txt",
@@ -2088,6 +2124,8 @@ class TestFullDownload:
                     file_path,
                     HashAlgorithm.XXH128,
                     local_path,
+                    mock_lock,
+                    mock_collision_dict,
                     "test-bucket",
                     "rootPrefix/Data",
                     mock_s3_client,
@@ -2095,6 +2133,8 @@ class TestFullDownload:
 
         expected_message = "Test exception"
         assert str(exc.value) == expected_message
+        mock_lock.assert_not_called()
+        mock_collision_dict.assert_not_called()
 
 
 @pytest.mark.parametrize("manifest_version", [ManifestVersion.v2023_03_03])
@@ -2532,3 +2572,54 @@ def test_mount_vfs_from_manifests(
         mock_vfs_start.assert_has_calls(
             [call(session_dir=temp_dir_path), call(session_dir=temp_dir_path)]
         )
+
+
+def test_get_new_copy_file_path_file_collisions(tmp_path: Path) -> None:
+    """Tests that copying files append the correct number"""
+    existing_files = [
+        tmp_path / "test_col.txt",
+        tmp_path / "test_col (1).txt",
+        tmp_path / "test_col (2).txt",
+        tmp_path / "test_col (3).txt",
+        tmp_path / "test_skip.txt",
+        tmp_path / "test_skip (1).txt",
+        tmp_path / "test_skip (2).txt",
+        tmp_path / "test_skip (4).txt",
+        tmp_path / "test_original.txt",
+        tmp_path / "test_overlapping_path_but_original.txt",
+        tmp_path / "test_overlapping_path_but_original (1).txt",
+    ]
+    for path in existing_files:
+        with open(str(path), "w") as f:
+            f.write("I am a pre-existing file, not downloaded by Job Attachment.")
+
+    assert set(existing_files) == set([path for path in tmp_path.glob("**/*") if path.is_file()])
+
+    expected_files = [
+        tmp_path / "test_col (4).txt",
+        tmp_path / "test_skip (3).txt",
+        tmp_path / "test_original (1).txt",
+        tmp_path / "test_overlapping_path_but_original (2).txt",
+        tmp_path / "test_overlapping_path_but_original (1) (1).txt",
+    ]
+
+    input_paths = [
+        tmp_path / "test_col.txt",
+        tmp_path / "test_skip.txt",
+        tmp_path / "test_original.txt",
+        tmp_path / "test_overlapping_path_but_original.txt",
+        tmp_path / "test_overlapping_path_but_original (1).txt",
+    ]
+
+    test_lock = Lock()
+    test_dict: DefaultDict[str, int] = DefaultDict(int)
+    results = []
+    for input_path in input_paths:
+        results.append(_get_new_copy_file_path(input_path, test_lock, test_dict))
+
+    assert set(expected_files) == set(results)
+    assert test_dict[str(tmp_path / "test_col.txt")] == 4
+    assert test_dict[str(tmp_path / "test_skip.txt")] == 3
+    assert test_dict[str(tmp_path / "test_original.txt")] == 1
+    assert test_dict[str(tmp_path / "test_overlapping_path_but_original.txt")] == 2
+    assert test_dict[str(tmp_path / "test_overlapping_path_but_original (1).txt")] == 1
