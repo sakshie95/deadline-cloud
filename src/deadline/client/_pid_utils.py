@@ -1,7 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 import os
-import psutil
 
 PID_FILE_NAME = "incremental_output_download.pid"
 
@@ -31,19 +30,22 @@ def check_and_obtain_pid_lock_if_available(download_progress_location, logger):
             # Read pid file and obtain the process id from file contents
             pid = f.read()
             try:
-                # Get process using the process id
-                psutil.Process(int(pid))
+                os.kill(int(pid), 0)
                 # Process with the pid exists, so we cannot obtain a lock
                 raise RuntimeError(
                     f"Another download is in progress at {download_progress_location}, use --force-bootstrap or wait for previous download to finish"
                 )
-            except psutil.NoSuchProcess:
+            except OSError:
                 # No such process exists with the process id, so we can delete the pid file
                 logger.echo(f"Process with pid {pid} is not running. Deleting pid file.")
                 os.remove(pid_file_full_path)
 
                 # Create a new pid file with the current process id
                 _obtain_pid_lock_atomically(pid_file_full_path, logger)
+
+            except Exception:
+                # For any other unexpected exceptions, we should not delete the pid file and raise an error.
+                raise
 
     except Exception:
         # We already checked the file exists before reading it.

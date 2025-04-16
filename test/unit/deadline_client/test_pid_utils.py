@@ -2,7 +2,6 @@
 
 import os
 import pytest
-import psutil
 from unittest.mock import patch, mock_open, MagicMock
 
 from deadline.client._pid_utils import (
@@ -55,13 +54,13 @@ class TestPidUtils:
         Tests when PID file exists but process is not running.
         This is the case when a run was terminated mid-way causing a stale pid file to exist.
         """
-        with patch("os.path.exists") as mock_exists, patch("psutil.Process") as mock_process, patch(
+        with patch("os.path.exists") as mock_exists, patch("os.kill") as mock_process, patch(
             "os.remove"
         ) as mock_remove, patch(
             "deadline.client._pid_utils._obtain_pid_lock_atomically"
         ) as mock_obtain_lock, patch("builtins.open", mock_open(read_data="1234")):
             mock_exists.return_value = True
-            mock_process.side_effect = psutil.NoSuchProcess(1234)
+            mock_process.side_effect = OSError(3, "No such process")  # Process does not exist
 
             check_and_obtain_pid_lock_if_available(test_paths["location"], mock_logger)
 
@@ -77,7 +76,7 @@ class TestPidUtils:
         Tests when PID file exists and process is running.
         This is the case when there is a run already ongoing for the CLI so the new one needs to be terminated.
         """
-        with patch("os.path.exists") as mock_exists, patch("psutil.Process") as mock_process, patch(
+        with patch("os.path.exists") as mock_exists, patch("os.kill") as mock_process, patch(
             "builtins.open", mock_open(read_data="1234")
         ):
             mock_exists.return_value = True
