@@ -112,9 +112,10 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
         name="incremental-output-download",
         help="BETA - Download Job Output data incrementally for all jobs running on a queue as session actions finish.\n"
         "The command bootstraps once using a bootstrap lookback specified in minutes and\n"
-        "continues downloading from the last saved progress thereafter until bootstrap is forced",
+        "continues downloading from the last saved progress thereafter until bootstrap is forced.\n"
+        "[NOTE] This command is still WIP and partially implemented right now",
     )
-    @click.option("--farm-id", help="The AWS Deadline Cloud Farm to use. ")
+    @click.option("--farm-id", help="The AWS Deadline Cloud Farm to use.")
     @click.option("--queue-id", help="The AWS Deadline Cloud Queue to use.")
     @click.option("--path-mapping-rules", help="Path to a file with the path mapping rules to use.")
     @click.option(
@@ -127,7 +128,7 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
         "minutes at bootstrap. Default value is 0 minutes.",
     )
     @click.option(
-        "--download-progress-location",
+        "--saved-progress-checkpoint-location",
         help="Proceed downloading from previous progress file at this location, if it exists.\n"
         "If parameter not provided or file does not exist,\n"
         "the download will start from the provided bootstrap lookback in minutes or it's default value. \n",
@@ -163,7 +164,7 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
         path_mapping_rules: str,
         json: bool,
         bootstrap_lookback_in_minutes: Optional[int],
-        download_progress_location: str,
+        saved_progress_checkpoint_location: str,
         force_bootstrap: bool,
         **args,
     ):
@@ -172,11 +173,12 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
         The command bootstraps once using a bootstrap lookback specified in minutes and
         continues downloading from the last saved progress thereafter until bootstrap is forced
 
-        :param path_mapping_rules:
-        :param json:
-        :param bootstrap_lookback_in_minutes:
-        :param download_progress_location:
-        :param force_bootstrap:
+        :param path_mapping_rules: path mapping rules for cross OS path mapping
+        :param json: whether output is printed as JSON for scripting
+        :param bootstrap_lookback_in_minutes: Downloads outputs for job-session-actions that have been completed
+        since these many minutes at bootstrap. Default value is 0 minutes.
+        :param saved_progress_checkpoint_location: location of the download progress file
+        :param force_bootstrap: force bootstrap and ignore current download progress. Default value is False.
         :param args:
         :return:
         """
@@ -188,7 +190,7 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
         try:
             # Validate file path inputs for downloading outputs incrementally.
             _queue_apis._validate_file_inputs_for_incremental_output_download(
-                download_progress_location=download_progress_location,
+                saved_progress_checkpoint_location=saved_progress_checkpoint_location,
                 path_mapping_rules=path_mapping_rules,
             )
         except RuntimeError as e:
@@ -210,7 +212,7 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
             boto3_session=boto3_session,
             farm_id=farm_id,
             queue_id=queue_id,
-            download_progress_location=download_progress_location,
+            saved_progress_checkpoint_location=saved_progress_checkpoint_location,
             bootstrap_lookback_in_minutes=bootstrap_lookback_in_minutes,
             force_bootstrap=force_bootstrap,
             path_mapping_rules=path_mapping_rules,

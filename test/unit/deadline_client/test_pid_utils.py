@@ -55,11 +55,17 @@ class TestPidUtils:
         Tests when PID file exists but process is not running.
         This is the case when a run was terminated mid-way causing a stale pid file to exist.
         """
+        # Create a mock file that will be returned by the context manager
+        mock_file = MagicMock()
+        mock_file.read.return_value = "1234"
+
+        # Create a context manager mock
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = mock_file
+
         with patch("os.path.exists") as mock_exists, patch("psutil.Process") as mock_process, patch(
-            "os.remove"
-        ) as mock_remove, patch(
-            "deadline.client._pid_utils._obtain_pid_lock_atomically"
-        ) as mock_obtain_lock, patch("builtins.open", mock_open(read_data="1234")):
+            "builtins.open", return_value=mock_cm
+        ), patch("deadline.client._pid_utils._obtain_pid_lock_atomically") as mock_obtain_lock:
             mock_exists.return_value = True
             mock_process.side_effect = psutil.NoSuchProcess(1234)
 
@@ -68,9 +74,11 @@ class TestPidUtils:
             expected_pid_file = os.path.join(
                 test_paths["location"], "incremental_output_download.pid"
             )
-            mock_remove.assert_called_once_with(expected_pid_file)
+
+            # Verify the file operations happened in the correct order
+            mock_file.read.assert_called_once()
+            mock_file.close.assert_called_once()
             mock_obtain_lock.assert_called_once_with(expected_pid_file, mock_logger)
-            mock_logger.echo.assert_called()
 
     def test_check_pid_lock_when_process_running(self, mock_logger, test_paths):
         """
