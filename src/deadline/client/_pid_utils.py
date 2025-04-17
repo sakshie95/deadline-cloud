@@ -39,6 +39,8 @@ def check_and_obtain_pid_lock_if_available(download_progress_location, logger):
                 # No such process exists with the process id, so we can delete the pid file
                 logger.echo(f"Process with pid {pid} is not running. Deleting pid file.")
 
+                f.close()
+
                 # Create a new pid file with the current process id
                 _obtain_pid_lock_atomically(pid_file_full_path, logger)
 
