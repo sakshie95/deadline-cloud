@@ -1,5 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 from deadline.client.cli._groups.click_logger import ClickLogger
+from typing import Set
 
 
 class SessionProcessor:
@@ -24,7 +25,7 @@ class SessionProcessor:
 
         logger.echo(f"Querying for sessions in jobs {ongoing_jobs}")
         sessions_from_api: list = []
-        ongoing_sessions: set[str] = set()
+        ongoing_sessions: Set[str] = set()
         # For every session check if UPDATED_AT is after last_lookback_time, if yes add to ongoing sessions list
         for session in sessions_from_api:
             if session.UPDATED_AT >= last_lookback_time:

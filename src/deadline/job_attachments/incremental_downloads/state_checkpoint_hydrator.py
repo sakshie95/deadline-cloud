@@ -2,7 +2,7 @@
 from deadline.job_attachments.incremental_downloads.models import HydrationState
 from deadline.job_attachments.incremental_downloads.models import StateFileModel
 from deadline.client.cli._groups.click_logger import ClickLogger
-from typing import Dict
+from typing import Dict, List
 
 
 class StateCheckpointHydrator:
@@ -89,7 +89,7 @@ class StateCheckpointHydrator:
         """
 
         # 1. Create a new jobs list for the updated progress
-        updated_jobs: list[dict] = []
+        updated_jobs: List[Dict] = []
 
         # 2. Track jobs that have at least one session
         jobs_with_sessions = set()
