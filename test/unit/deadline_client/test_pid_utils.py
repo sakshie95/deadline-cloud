@@ -39,15 +39,17 @@ class TestPidUtils:
         """
         with patch("os.path.exists") as mock_exists, patch(
             "deadline.client._pid_utils._obtain_pid_lock_atomically"
-        ) as mock_obtain_lock:
+        ) as mock_obtain_lock, patch("os.getpid") as mock_get_pid:
             mock_exists.return_value = False
+            pid: int = 1234
+            mock_get_pid.return_value = pid
 
-            check_and_obtain_pid_lock_if_available(test_paths["location"], mock_logger)
+            check_and_obtain_pid_lock_if_available(test_paths["location"], str(pid), mock_logger)
 
             expected_pid_file = os.path.join(
-                test_paths["location"], "incremental_output_download.pid"
+                test_paths["location"], str(pid) + "_incremental_output_download.pid"
             )
-            mock_obtain_lock.assert_called_once_with(expected_pid_file, mock_logger)
+            mock_obtain_lock.assert_called_once_with(expected_pid_file, mock_logger, 1234)
             assert mock_logger.echo.called
 
     def test_check_pid_lock_when_process_not_running(self, mock_logger, test_paths):
@@ -65,20 +67,24 @@ class TestPidUtils:
 
         with patch("os.path.exists") as mock_exists, patch("psutil.Process") as mock_process, patch(
             "builtins.open", return_value=mock_cm
-        ), patch("deadline.client._pid_utils._obtain_pid_lock_atomically") as mock_obtain_lock:
+        ), patch(
+            "deadline.client._pid_utils._obtain_pid_lock_atomically"
+        ) as mock_obtain_lock, patch("os.getpid") as mock_get_pid:
             mock_exists.return_value = True
+            pid: int = 5678
+            mock_get_pid.return_value = pid
             mock_process.side_effect = psutil.NoSuchProcess(1234)
 
-            check_and_obtain_pid_lock_if_available(test_paths["location"], mock_logger)
+            check_and_obtain_pid_lock_if_available(test_paths["location"], str(pid), mock_logger)
 
             expected_pid_file = os.path.join(
-                test_paths["location"], "incremental_output_download.pid"
+                test_paths["location"], str(pid) + "_incremental_output_download.pid"
             )
 
             # Verify the file operations happened in the correct order
             mock_file.read.assert_called_once()
             mock_file.close.assert_called_once()
-            mock_obtain_lock.assert_called_once_with(expected_pid_file, mock_logger)
+            mock_obtain_lock.assert_called_once_with(expected_pid_file, mock_logger, 5678)
 
     def test_check_pid_lock_when_process_running(self, mock_logger, test_paths):
         """
@@ -92,7 +98,7 @@ class TestPidUtils:
             mock_process.return_value = MagicMock()  # Process exists
 
             with pytest.raises(RuntimeError) as exc_info:
-                check_and_obtain_pid_lock_if_available(test_paths["location"], mock_logger)
+                check_and_obtain_pid_lock_if_available(test_paths["location"], "1234", mock_logger)
 
             assert "Another download is in progress" in str(exc_info.value)
             assert mock_logger.echo.called
@@ -113,7 +119,7 @@ class TestPidUtils:
         ) as mock_getpid, patch("os.replace") as mock_replace, patch("os.fsync") as mock_fsync:
             mock_getpid.return_value = test_pid
 
-            _obtain_pid_lock_atomically(pid_file, mock_logger)
+            _obtain_pid_lock_atomically(pid_file, mock_logger, test_pid)
 
             # Verify file operations
             mock_file_open.assert_called_once_with(tmp_file, "w+")
@@ -142,6 +148,56 @@ class TestPidUtils:
             mock_exists.return_value = True
 
             with pytest.raises(type(error)) as exc_info:
-                check_and_obtain_pid_lock_if_available(test_paths["location"], mock_logger)
+                check_and_obtain_pid_lock_if_available(test_paths["location"], "1234", mock_logger)
 
             assert str(exc_info.value) == expected_message
+
+    def test_release_pid_lock_when_file_does_not_exist(self, mock_logger, test_paths):
+        """
+        Tests releasing a PID lock when the file doesn't exist.
+        """
+        with patch("os.path.exists") as mock_exists:
+            mock_exists.return_value = False
+
+            from deadline.client._pid_utils import release_pid_lock
+
+            result = release_pid_lock(test_paths["location"], "1234", mock_logger)
+
+            assert result is True
+            assert mock_logger.echo.called
+            assert "Pid lock file does not exist" in mock_logger.echo.call_args_list[1][0][0]
+
+    def test_release_pid_lock_when_pid_matches(self, mock_logger, test_paths):
+        """
+        Tests releasing a PID lock when the PID matches the current process.
+        """
+        with patch("os.path.exists") as mock_exists, patch(
+            "builtins.open", mock_open(read_data="1234")
+        ), patch("os.remove") as mock_remove:
+            mock_exists.return_value = True
+
+            from deadline.client._pid_utils import release_pid_lock
+
+            result = release_pid_lock(test_paths["location"], "1234", mock_logger)
+
+            assert result is True
+            assert mock_logger.echo.called
+            assert "Deleting pid file" in mock_logger.echo.call_args_list[1][0][0]
+            mock_remove.assert_called_once()
+
+    def test_release_pid_lock_when_pid_does_not_match(self, mock_logger, test_paths):
+        """
+        Tests releasing a PID lock when the PID doesn't match the current process.
+        """
+        with patch("os.path.exists") as mock_exists, patch(
+            "builtins.open", mock_open(read_data="5678")
+        ):
+            mock_exists.return_value = True
+
+            from deadline.client._pid_utils import release_pid_lock
+
+            result = release_pid_lock(test_paths["location"], "1234", mock_logger)
+
+            assert result is False
+            assert mock_logger.echo.called
+            assert "Skipping pid file deletion" in mock_logger.echo.call_args_list[1][0][0]
