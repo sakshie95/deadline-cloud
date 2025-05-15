@@ -15,10 +15,7 @@ from deadline.client.cli._groups.click_logger import ClickLogger
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
-@patch(
-    "deadline.client.api._queue_apis.IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow"
-)
-def test_incremental_output_download_success(mock_download_orchestrator, mock_pid_lock, tmp_path):
+def test_incremental_output_download_success(mock_pid_lock, tmp_path):
     """Test successful execution of _incremental_output_download"""
     # Arrange
     farm_id = "farm-0123456789abcdef"
@@ -78,17 +75,6 @@ def test_incremental_output_download_success(mock_download_orchestrator, mock_pi
     # Assert
     mock_pid_lock.assert_called_once_with(
         saved_progress_checkpoint_location, f"{os.getpid()}", logger
-    )
-    mock_download_orchestrator.assert_called_once_with(
-        boto3_session,
-        farm_id,
-        logger,
-        None,
-        queue_id,
-        saved_progress_checkpoint_location,
-        0,
-        False,
-        f"{os.getpid()}",
     )
 
 

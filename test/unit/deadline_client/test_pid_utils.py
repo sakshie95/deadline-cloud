@@ -47,7 +47,7 @@ class TestPidUtils:
             check_and_obtain_pid_lock_if_available(test_paths["location"], str(pid), mock_logger)
 
             expected_pid_file = os.path.join(
-                test_paths["location"], str(pid) + "_incremental_output_download.pid"
+                test_paths["location"], "incremental_output_download.pid"
             )
             mock_obtain_lock.assert_called_once_with(expected_pid_file, mock_logger, 1234)
             assert mock_logger.echo.called
@@ -78,7 +78,7 @@ class TestPidUtils:
             check_and_obtain_pid_lock_if_available(test_paths["location"], str(pid), mock_logger)
 
             expected_pid_file = os.path.join(
-                test_paths["location"], str(pid) + "_incremental_output_download.pid"
+                test_paths["location"], "incremental_output_download.pid"
             )
 
             # Verify the file operations happened in the correct order
@@ -109,7 +109,7 @@ class TestPidUtils:
         """
         test_pid = 5678
         pid_file = os.path.join(test_paths["location"], "incremental_output_download.pid")
-        tmp_file = f"{pid_file}~tmp"
+        tmp_file = f"{pid_file}{test_pid}~tmp"
 
         # Create the mock_open correctly
         mocked_open = mock_open()
@@ -201,3 +201,50 @@ class TestPidUtils:
             assert result is False
             assert mock_logger.echo.called
             assert "Skipping pid file deletion" in mock_logger.echo.call_args_list[1][0][0]
+
+    def test_check_pid_lock_concurrent_access(self, mock_logger, test_paths):
+        """
+        Tests the scenario when two threads with different PIDs try to obtain a lock.
+        The first thread should succeed, and the second thread should fail.
+        """
+        # Setup
+        pid1 = "1234"
+        pid2 = "5678"
+        pid_file_path = os.path.join(test_paths["location"], "incremental_output_download.pid")
+
+        # Mock file operations and process checks
+        with patch("os.path.exists") as mock_exists, patch(
+            "builtins.open", mock_open(read_data=pid1)
+        ) as mock_file, patch("psutil.Process") as mock_process, patch(
+            "deadline.client._pid_utils._obtain_pid_lock_atomically"
+        ) as mock_obtain_lock:
+            # First call - file doesn't exist, lock is obtained
+            mock_exists.side_effect = [False]  # First PID file doesn't exist
+            mock_obtain_lock.return_value = True
+
+            mock_file.return_value = MagicMock()
+
+            # First thread obtains lock successfully
+            result1 = check_and_obtain_pid_lock_if_available(
+                test_paths["location"], pid1, mock_logger
+            )
+            assert result1 is True
+            mock_obtain_lock.assert_called_once_with(pid_file_path, mock_logger, int(pid1))
+
+            # Reset mocks for second call
+            mock_exists.reset_mock()
+            mock_obtain_lock.reset_mock()
+
+            # Second call - file exists, process is running
+            mock_exists.side_effect = [True]  # Second PID file exists
+            mock_process.return_value = MagicMock()  # Process exists/is running
+
+            # Second thread fails to obtain lock
+            with pytest.raises(RuntimeError) as exc_info:
+                check_and_obtain_pid_lock_if_available(test_paths["location"], pid2, mock_logger)
+
+            assert "Another download is in progress" in str(exc_info.value)
+            mock_obtain_lock.assert_not_called()  # Lock should not be attempted
+
+            # Verify logger was called appropriately
+            assert mock_logger.echo.called

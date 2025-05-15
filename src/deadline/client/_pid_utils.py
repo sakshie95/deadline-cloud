@@ -8,7 +8,7 @@ PID_FILE_NAME = "incremental_output_download.pid"
 
 
 def check_and_obtain_pid_lock_if_available(
-    saved_progress_checkpoint_location: str, current_process_pid: str, logger: ClickLogger
+    pid_file_location: str, current_process_pid: str, logger: ClickLogger
 ) -> bool:
     """
     Checks if the pid lock file for the download exists and if it does, it checks if the process is still running.
@@ -16,18 +16,14 @@ def check_and_obtain_pid_lock_if_available(
     If the process is not running, it deletes the pid lock file.
     If the pid lock file does not exist, it creates a new one and acquires lock for this pid.
     :param current_process_pid: current process's id
-    :param saved_progress_checkpoint_location: location of the download progress file
+    :param pid_file_location: location of the pid lock file
     :param logger: Click logger component
     :return:
     """
-    logger.echo(
-        f"Checking if another download is in progress at {saved_progress_checkpoint_location}"
-    )
+    logger.echo(f"Checking if another download is in progress at {pid_file_location}")
 
     # Get the full path of the pid file at download progress location
-    pid_file_full_path = os.path.join(
-        saved_progress_checkpoint_location, f"{current_process_pid}_{PID_FILE_NAME}"
-    )
+    pid_file_full_path = os.path.join(pid_file_location, PID_FILE_NAME)
     try:
         # Check if download progress file does not exist.
         if not os.path.exists(pid_file_full_path):
@@ -44,7 +40,7 @@ def check_and_obtain_pid_lock_if_available(
                 psutil.Process(int(pid))
                 # Process with the pid exists, so we cannot obtain a lock
                 raise RuntimeError(
-                    f"Another download is in progress at {saved_progress_checkpoint_location}, use --force-bootstrap or wait for previous download to finish"
+                    f"Another download is in progress at {pid_file_location}, use --force-bootstrap or wait for previous download to finish"
                 )
             except psutil.NoSuchProcess:
                 # No such process exists with the process id, so we can delete the pid file
@@ -63,22 +59,18 @@ def check_and_obtain_pid_lock_if_available(
         raise
 
 
-def release_pid_lock(
-    saved_progress_checkpoint_location: str, current_process_pid: str, logger: ClickLogger
-) -> bool:
+def release_pid_lock(pid_file_location: str, current_process_pid: str, logger: ClickLogger) -> bool:
     """
     Releases the pid lock by deleting the pid file.
     :param current_process_pid: current process's id
-    :param saved_progress_checkpoint_location: location of the download progress file
+    :param pid_file_location: location of the pid lock file
     :param logger: Click logger component
     :return:
     """
-    logger.echo(f"Releasing pid lock at {saved_progress_checkpoint_location}")
+    logger.echo(f"Releasing pid lock at {pid_file_location}")
 
     # Get the full path of the pid file at download progress location
-    pid_file_full_path = os.path.join(
-        saved_progress_checkpoint_location, f"{current_process_pid}_{PID_FILE_NAME}"
-    )
+    pid_file_full_path = os.path.join(pid_file_location, PID_FILE_NAME)
 
     # Check if pid lock file does not exist.
     if not os.path.exists(pid_file_full_path):
@@ -114,7 +106,7 @@ def _obtain_pid_lock_atomically(
     """
 
     # Generate a tmp file for writing the pid file as a whole and making the pid locking atomic
-    tmp_file_name = pid_file_full_path + "~tmp"
+    tmp_file_name = pid_file_full_path + f"{current_process_pid}~tmp"
 
     # Get the current process id to write to pid file
     text = str(current_process_pid)

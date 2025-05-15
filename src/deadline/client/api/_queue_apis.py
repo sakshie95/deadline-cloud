@@ -8,9 +8,6 @@ from typing import Optional
 import boto3
 from deadline.client.cli._groups.click_logger import ClickLogger
 from deadline.client import _pid_utils
-from deadline.job_attachments.incremental_downloads.orchestrator import (
-    IncrementalDownloadsOrchestrator,
-)
 
 import os
 
@@ -56,18 +53,7 @@ def _incremental_output_download(
         )
         return
 
-    # 3. Orchestrate the download workflow for outputs of all jobs running on queue
-    return IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow(
-        boto3_session,
-        farm_id,
-        logger,
-        path_mapping_rules,
-        queue_id,
-        saved_progress_checkpoint_location,
-        bootstrap_lookback_in_minutes,
-        force_bootstrap,
-        current_process_pid,
-    )
+    # TODO 3. Orchestrate the download workflow for outputs of all jobs running on queue
 
 
 def _validate_file_inputs_for_incremental_output_download(
