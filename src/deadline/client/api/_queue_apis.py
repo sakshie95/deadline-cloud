@@ -19,23 +19,27 @@ def _incremental_output_download(
     boto3_session: boto3.Session,
     saved_progress_checkpoint_location: str,
     bootstrap_lookback_in_minutes: Optional[int] = 0,
-    force_bootstrap: Optional[bool] = False,
+    force_bootstrap: bool = False,
     path_mapping_rules: Optional[str] = None,
     logger: ClickLogger = ClickLogger(False),
-):
+) -> None:
     """
-    Incrementally download outputs for jobs in a queue.
+    Download Job Output data incrementally for all jobs running on a queue as session actions finish.
+    The command bootstraps once using a bootstrap lookback specified in minutes and
+    continues downloading from the last saved progress thereafter until bootstrap is forced
 
-    Args:
-        farm_id (str): The farm ID
-        queue_id (str): The queue ID
-        boto3_session (boto3.Session): The boto3 session
-        saved_progress_checkpoint_location (str): Location to save progress checkpoints
-        bootstrap_lookback_in_minutes (int, optional): Bootstrap lookback in minutes, default is 0
-        force_bootstrap (bool, optional): option to force bootstrap the command
-        path_mapping_rules (str, optional): Path mapping rules for cross-OS path mapping
-        logger: Logger instance for logging messages
+    :param farm_id: farm id for the output download
+    :param queue_id: queue for scoping output download
+    :param bootstrap_lookback_in_minutes: Downloads outputs for job-session-actions that have been completed
+    since these many minutes at bootstrap. Default value is 0 minutes.
+    :param saved_progress_checkpoint_location: location of the download progress file
+    :param force_bootstrap: force bootstrap and ignore current download progress. Default value is False.
+    :param path_mapping_rules: path mapping rules for cross OS path mapping
+    :param boto3_session: boto3 session
+    :param logger: Click logger component
+    :return: None
     """
+
     try:
         # 1. First get the current process's pid
         current_process_pid: str = str(os.getpid())
