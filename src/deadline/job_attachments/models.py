@@ -27,6 +27,7 @@ from deadline.job_attachments.exceptions import (
 from ._utils import (
     _generate_random_guid,
     _join_s3_paths,
+    _float_to_iso_datetime_string,
 )
 
 S3_DATA_FOLDER_NAME = "Data"
@@ -290,6 +291,32 @@ class JobAttachmentS3Settings:
             session_action_id,
         )
 
+    @staticmethod
+    def partial_session_action_manifest_prefix(
+        farm_id: str,
+        queue_id: str,
+        job_id: str,
+        step_id: str,
+        task_id: str,
+        session_action_id: str,
+        time: float,
+    ) -> str:
+        """
+        Constructs the partial S3 prefix for storing session action output manifests.
+
+        This method creates a hierarchical path structure for organizing output manifests in S3,
+        following the pattern: farm_id/queue_id/job_id/step_id/task_id/timestamp_session_action_id.
+        The timestamp is converted from a float to an ISO datetime string format.
+        """
+        return _join_s3_paths(
+            farm_id,
+            queue_id,
+            job_id,
+            step_id,
+            task_id,
+            f"{_float_to_iso_datetime_string(time)}_{session_action_id}",
+        )
+
     def partial_manifest_prefix(self, farm_id, queue_id) -> str:
         guid = _generate_random_guid()
         return _join_s3_paths(
@@ -390,7 +417,8 @@ class GlobConfig:
 class ManifestSnapshot:
     """Data structure to store the results of a manifest snapshot"""
 
-    manifest: str = field(default_factory=str)
+    root: str
+    manifest: str
 
 
 @dataclass
@@ -449,3 +477,19 @@ class FileStatus(Enum):
     NEW = 1
     MODIFIED = 2
     DELETED = 3
+
+
+@dataclass
+class UploadManifestInfo:
+    """
+    Structured class for output manifest information.
+
+    Attributes:
+        output_manifest_path: The relative path to the uploaded output manifest without root prefix
+        output_manifest_hash: The hash of the output manifest content
+        source_path: Optional source path from the mapping rule
+    """
+
+    output_manifest_path: str
+    output_manifest_hash: str
+    source_path: Optional[str] = None
