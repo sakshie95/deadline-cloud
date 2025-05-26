@@ -4,32 +4,28 @@ import os
 import psutil
 from deadline.client.cli._groups.click_logger import ClickLogger
 
-PID_FILE_NAME = "incremental_output_download.pid"
 
-
-def check_and_obtain_pid_lock_if_available(
-    pid_file_location: str, current_process_pid: str, logger: ClickLogger
-) -> bool:
+def check_and_obtain_pid_lock_if_available(pid_file_full_path: str, logger: ClickLogger) -> bool:
     """
-    Checks if the pid lock file for the download exists and if it does, it checks if the process is still running.
+    Checks if the specified pid lock file exists and if it does, it checks if the process is still running.
     If the process is still running, it raises an exception.
     If the process is not running, it deletes the pid lock file.
     If the pid lock file does not exist, it creates a new one and acquires lock for this pid.
-    :param current_process_pid: current process's id
-    :param pid_file_location: location of the pid lock file
+    :param pid_file_full_path: full path of the pid lock file
     :param logger: Click logger component
     :return:
     """
-    logger.echo(f"Checking if another download is in progress at {pid_file_location}")
+    logger.echo(f"Checking if another download is in progress at {pid_file_full_path}")
 
-    # Get the full path of the pid file at download progress location
-    pid_file_full_path = os.path.join(pid_file_location, PID_FILE_NAME)
+    # Get the current process's id to obtain lock
+    current_process_pid: int = os.getpid()
+
     try:
         # Check if download progress file does not exist.
         if not os.path.exists(pid_file_full_path):
             logger.echo(f"Download progress file does not exist at {pid_file_full_path}")
             # Create a new pid file with the current process id
-            return _obtain_pid_lock_atomically(pid_file_full_path, logger, int(current_process_pid))
+            return _obtain_pid_lock_atomically(pid_file_full_path, logger, current_process_pid)
 
         # Try to open pid file at download progress location in read mode
         with open(pid_file_full_path, "r") as f:
@@ -40,7 +36,7 @@ def check_and_obtain_pid_lock_if_available(
                 psutil.Process(int(pid))
                 # Process with the pid exists, so we cannot obtain a lock
                 raise RuntimeError(
-                    f"Another download is in progress at {pid_file_location}, use --force-bootstrap or wait for previous download to finish"
+                    f"Another download is in progress at {pid_file_full_path}, use --force-bootstrap or wait for previous download to finish"
                 )
             except psutil.NoSuchProcess:
                 # No such process exists with the process id, so we can delete the pid file
@@ -49,9 +45,7 @@ def check_and_obtain_pid_lock_if_available(
                 f.close()  # Close the file before over-writing it
 
                 # Create a new pid file with the current process id
-                return _obtain_pid_lock_atomically(
-                    pid_file_full_path, logger, int(current_process_pid)
-                )
+                return _obtain_pid_lock_atomically(pid_file_full_path, logger, current_process_pid)
 
     except Exception:
         # We already checked the file exists before reading it.
@@ -59,20 +53,19 @@ def check_and_obtain_pid_lock_if_available(
         raise
 
 
-def release_pid_lock(pid_file_location: str, current_process_pid: str, logger: ClickLogger) -> bool:
+def release_pid_lock(pid_file_full_path: str, logger: ClickLogger) -> bool:
     """
     Releases the pid lock by deleting the pid file.
-    :param current_process_pid: current process's id
-    :param pid_file_location: location of the pid lock file
+    :param pid_file_full_path: full path of the pid lock file
     :param logger: Click logger component
-    :return:
+    :return: boolean, True if pid lock released successfully
     """
-    logger.echo(f"Releasing pid lock at {pid_file_location}")
+    logger.echo(f"Releasing pid lock at {pid_file_full_path}")
 
-    # Get the full path of the pid file at download progress location
-    pid_file_full_path = os.path.join(pid_file_location, PID_FILE_NAME)
+    # Get the current process's id to obtain lock
+    current_process_pid: int = os.getpid()
 
-    # Check if pid lock file does not exist.
+    # Check if pid lock file does not exist. Returns True if file doesn't exist as there is no lock to be released.
     if not os.path.exists(pid_file_full_path):
         logger.echo(f"Pid lock file does not exist at {pid_file_full_path}")
         return True
@@ -81,17 +74,18 @@ def release_pid_lock(pid_file_location: str, current_process_pid: str, logger: C
     with open(pid_file_full_path, "r") as f:
         # Read pid file and obtain the process id from file contents
         pid = f.read()
-        # Process pid from file is same as current process pid - release pid lock
-        if pid == current_process_pid:
-            logger.echo(f"Process with pid {pid} is the current process. Deleting pid file.")
-            os.remove(pid_file_full_path)
-            return True
-        # Process pid from file is different from current process pid - do not release lock
-        else:
-            logger.echo(
-                f"Process with pid {pid} is not the current process. Skipping pid file deletion."
-            )
-            return False
+
+    # Process pid from file is same as current process pid - release pid lock
+    if int(pid) == current_process_pid:
+        logger.echo(f"Process with pid {pid} is the current process. Deleting pid file.")
+        os.remove(pid_file_full_path)
+        return True
+    # Process pid from file is different from current process pid - do not release lock
+    else:
+        logger.echo(
+            f"Process with pid {pid} is not the current process. Skipping pid file deletion."
+        )
+        return False
 
 
 def _obtain_pid_lock_atomically(

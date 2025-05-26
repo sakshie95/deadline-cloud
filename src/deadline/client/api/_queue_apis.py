@@ -11,6 +11,8 @@ from deadline.client import _pid_utils
 
 import os
 
+PID_FILE_NAME = "incremental_output_download.pid"
+
 
 @api.record_function_latency_telemetry_event()
 def _incremental_output_download(
@@ -41,13 +43,11 @@ def _incremental_output_download(
     """
 
     try:
-        # 1. First get the current process's pid
-        current_process_pid: str = str(os.getpid())
+        # 1. Construct pid file full path
+        pid_file_full_path = os.path.join(saved_progress_checkpoint_location, PID_FILE_NAME)
 
         # 2. Check if a download is already ongoing with pid lock checking mechanism
-        _pid_utils.check_and_obtain_pid_lock_if_available(
-            saved_progress_checkpoint_location, current_process_pid, logger
-        )
+        _pid_utils.check_and_obtain_pid_lock_if_available(pid_file_full_path, logger)
     except RuntimeError as e:
         logger.echo(f"Download failed because of error : {e}")
         return

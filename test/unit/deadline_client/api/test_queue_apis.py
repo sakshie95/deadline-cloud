@@ -2,7 +2,6 @@
 
 
 import os
-import json
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -22,46 +21,13 @@ def test_incremental_output_download_success(mock_pid_lock, tmp_path):
     queue_id = "queue-0123456789abcdef"
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
+    pid_file_full_path = os.path.join(
+        saved_progress_checkpoint_location, "incremental_output_download.pid"
+    )
     logger: ClickLogger = ClickLogger(is_json=False)
-
-    # Test download progress
-    download_progress_json = {
-        "lastLookbackTime": "2025-04-04T05:30:00",
-        "jobs": [
-            {
-                "jobId": "Job-1234353453443",
-                "sessions": [
-                    {
-                        "sessionId": "Session-1324324354354",
-                        "sessionLifecycleStatus": "SUCCESSFUL",
-                        "lastDownloadedSessActionId": 3,
-                    },
-                    {
-                        "sessionId": "Session-3423435435454",
-                        "sessionLifecycleStatus": "RUNNING",
-                        "lastDownloadedSessActionId": 6,
-                    },
-                ],
-            },
-            {
-                "jobId": "Job-3234324354345",
-                "sessions": [
-                    {
-                        "sessionId": "Session-4235435434345",
-                        "sessionLifecycleStatus": "FAILED",
-                        "lastDownloadedSessActionId": 3,
-                    }
-                ],
-            },
-        ],
-    }
 
     # make directory
     os.mkdir(saved_progress_checkpoint_location)
-
-    # Create file at saved_progress_checkpoint_location with contents as StateFileModel
-    with open(f"{saved_progress_checkpoint_location}/download_progress.json", "w+") as f:
-        f.write(json.dumps(download_progress_json))
 
     # Act
     _incremental_output_download(
@@ -73,9 +39,7 @@ def test_incremental_output_download_success(mock_pid_lock, tmp_path):
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(
-        saved_progress_checkpoint_location, f"{os.getpid()}", logger
-    )
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
@@ -86,6 +50,9 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, tmp_path):
     queue_id = "queue-0123456789abcdef"
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
+    pid_file_full_path = os.path.join(
+        saved_progress_checkpoint_location, "incremental_output_download.pid"
+    )
     logger = MagicMock(spec=ClickLogger)
 
     mock_pid_lock.side_effect = RuntimeError("Download already in progress")
@@ -100,9 +67,7 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, tmp_path):
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(
-        saved_progress_checkpoint_location, f"{os.getpid()}", logger
-    )
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
     logger.echo.assert_called_once_with(
         "Download failed because of error : Download already in progress"
     )
@@ -116,6 +81,9 @@ def test_incremental_output_download_generic_exception(mock_pid_lock, tmp_path):
     queue_id = "queue-0123456789abcdef"
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
+    pid_file_full_path = os.path.join(
+        saved_progress_checkpoint_location, "incremental_output_download.pid"
+    )
     logger = MagicMock(spec=ClickLogger)
 
     mock_pid_lock.side_effect = Exception("Unexpected error")
@@ -130,9 +98,7 @@ def test_incremental_output_download_generic_exception(mock_pid_lock, tmp_path):
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(
-        saved_progress_checkpoint_location, f"{os.getpid()}", logger
-    )
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
     logger.echo.assert_called_once()
     assert "Failed to obtain lock for download progress" in logger.echo.call_args[0][0]
 
