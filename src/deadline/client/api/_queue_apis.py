@@ -8,8 +8,13 @@ from typing import Optional
 import boto3
 from deadline.client.cli._groups.click_logger import ClickLogger
 from deadline.client import _pid_utils
+from deadline.job_attachments.incremental_downloads.orchestrator import (
+    IncrementalDownloadsOrchestrator,
+)
 
 import os
+
+PID_FILE_NAME = "incremental_output_download.pid"
 
 
 @api.record_function_latency_telemetry_event()
@@ -41,10 +46,11 @@ def _incremental_output_download(
     """
 
     try:
-        # Check if a download is already ongoing with pid lock checking mechanism
-        _pid_utils.check_and_obtain_pid_lock_if_available(
-            saved_progress_checkpoint_location, logger
-        )
+        # 1. Construct pid file full path
+        pid_file_full_path = os.path.join(saved_progress_checkpoint_location, PID_FILE_NAME)
+
+        # 2. Check if a download is already ongoing with pid lock checking mechanism
+        _pid_utils.check_and_obtain_pid_lock_if_available(pid_file_full_path, logger)
     except RuntimeError as e:
         logger.echo(f"Download failed because of error : {e}")
         return
@@ -53,6 +59,21 @@ def _incremental_output_download(
             f"Failed to obtain lock for download progress at {saved_progress_checkpoint_location} due to unexpected exception : {e}"
         )
         return
+
+    # 3. Orchestrate the download workflow for outputs of all jobs running on queue
+    IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow(
+        boto3_session,
+        farm_id,
+        logger,
+        path_mapping_rules,
+        queue_id,
+        saved_progress_checkpoint_location,
+        bootstrap_lookback_in_minutes,
+        force_bootstrap,
+    )
+
+    # 4. Release pid lock since operation is complete
+    _pid_utils.release_pid_lock(pid_file_full_path, logger)
 
 
 def _validate_file_inputs_for_incremental_output_download(
