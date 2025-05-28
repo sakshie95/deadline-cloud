@@ -45,7 +45,10 @@ class IncrementalDownloadsOrchestrator:
         )
         current_download_progress: StateFileModel = StateFileModel()
 
-        # 1. Bootstrap if required
+        # 1. Bootstrap to ignore current download progress & set lookback based on bootstrap_lookback_in_minutes if:
+        # this is the first run of the command & save progress checkpoint file does not exist
+        # OR
+        # if force bootstrap option is provided by customer
         if force_bootstrap or not os.path.exists(saved_progress_checkpoint_full_path):
             logger.echo(
                 "Bootstrapping command. Ignoring download progress location and creating new"
@@ -71,11 +74,11 @@ class IncrementalDownloadsOrchestrator:
                 )
                 return False
 
-        # TODO 3. Download outputs of ongoing jobs, sessions, session actions using current progress
-        # Right now it is set to no change in progress
+        # 3. Download and update download progress.
+        # Right now it is set to no change in progress.
         updated_download_progress: StateFileModel = current_download_progress
 
-        # 4. Save progress back to state file
+        # 4. Save updated download progress back to state file
         cls._save_download_progress_to_state_file(
             saved_progress_checkpoint_location,
             saved_progress_checkpoint_full_path,
