@@ -75,8 +75,9 @@ class IncrementalDownloadsOrchestrator:
                 return False
 
         # 3. Download and update download progress.
-        # Right now it is set to no change in progress.
+        # Right now it is set to no change in progress except setting the last lookback time to now
         updated_download_progress: StateFileModel = current_download_progress
+        updated_download_progress.last_lookback_time = datetime.datetime.utcnow().isoformat() + "Z"
 
         # 4. Save updated download progress back to state file
         cls._save_download_progress_to_state_file(

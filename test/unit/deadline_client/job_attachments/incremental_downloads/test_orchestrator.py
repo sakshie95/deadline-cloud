@@ -10,7 +10,6 @@ from deadline.job_attachments.incremental_downloads.orchestrator import (
 )
 from deadline.job_attachments.incremental_downloads.models import StateFileModel
 from freezegun import freeze_time
-from freezegun.api import FakeDatetime
 
 
 class TestIncrementalDownloadsOrchestrator:
@@ -96,7 +95,7 @@ class TestIncrementalDownloadsOrchestrator:
         assert result is True
         expected_download_progress: StateFileModel = StateFileModel()
         # Frozen current time - 60 minutes of bootstrap_lookback_in_minutes
-        expected_download_progress.last_lookback_time = FakeDatetime(2025, 5, 26, 11, 0)
+        expected_download_progress.last_lookback_time = "2025-05-26T12:00:00Z"
 
         mock_save.assert_called_once()
 
@@ -106,6 +105,7 @@ class TestIncrementalDownloadsOrchestrator:
             == expected_download_progress.last_lookback_time
         )
 
+    @freeze_time("2025-05-26 12:00:00")
     def test_orchestrate_download_outputs_workflow_load_existing(
         self, mock_logger, mock_boto3_session, test_paths, mock_state_file_model
     ):
@@ -141,8 +141,8 @@ class TestIncrementalDownloadsOrchestrator:
             assert result is True
             mock_from_dict.assert_called_once()
             mock_save.assert_called_once()
-            # Validate that the last lookback time got updated to the lookback time from current progress state file
-            assert mock_save.call_args[0][2].last_lookback_time == "2023-01-01T00:00:00Z"
+            # Validate that the last lookback time got updated to now, i.e. frozen time
+            assert mock_save.call_args[0][2].last_lookback_time == "2025-05-26T12:00:00Z"
 
     @freeze_time("2025-05-26 12:00:00")
     def test_orchestrate_download_outputs_workflow_force_bootstrap(
@@ -173,12 +173,12 @@ class TestIncrementalDownloadsOrchestrator:
             # Assert
             assert result is True
             expected_download_progress: StateFileModel = StateFileModel()
-            # Frozen current time - 60 minutes of bootstrap_lookback_in_minutes
-            expected_download_progress.last_lookback_time = FakeDatetime(2025, 5, 26, 11, 0)
+            # Frozen current time
+            expected_download_progress.last_lookback_time = "2025-05-26T12:00:00Z"
 
             mock_save.assert_called_once()
 
-            # Validate that the last lookback time got updated to the current time - bootstrap_lookback_in_minutes
+            # Validate that the last lookback time got updated to the current time
             assert (
                 mock_save.call_args[0][2].last_lookback_time
                 == expected_download_progress.last_lookback_time
@@ -212,12 +212,12 @@ class TestIncrementalDownloadsOrchestrator:
             # Assert
             assert result is True
             expected_download_progress: StateFileModel = StateFileModel()
-            # Frozen current time - 60 minutes of bootstrap_lookback_in_minutes
-            expected_download_progress.last_lookback_time = FakeDatetime(2025, 5, 26, 12, 0)
+            # Frozen current time
+            expected_download_progress.last_lookback_time = "2025-05-26T12:00:00Z"
 
             mock_save.assert_called_once()
 
-            # Validate that last lookback time got updated to the current time - 0 since there's no bootstrap lookback
+            # Validate that last lookback time got updated to the current time
             assert (
                 mock_save.call_args[0][2].last_lookback_time
                 == expected_download_progress.last_lookback_time
