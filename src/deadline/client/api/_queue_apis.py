@@ -4,9 +4,8 @@ from __future__ import annotations
 __all__ = ["_incremental_output_download"]
 
 from .. import api
-from typing import Optional
+from typing import Optional, Callable
 import boto3
-from deadline.client.cli._groups.click_logger import ClickLogger
 from deadline.client import _pid_utils
 
 import os
@@ -23,7 +22,7 @@ def _incremental_output_download(
     bootstrap_lookback_in_minutes: Optional[int] = 0,
     force_bootstrap: bool = False,
     path_mapping_rules: Optional[str] = None,
-    logger: ClickLogger = ClickLogger(False),
+    print_function_callback: Callable[[str], None] = lambda msg: None,
 ) -> None:
     """
     Download Job Output data incrementally for all jobs running on a queue as session actions finish.
@@ -38,7 +37,8 @@ def _incremental_output_download(
     :param force_bootstrap: force bootstrap and ignore current download progress. Default value is False.
     :param path_mapping_rules: path mapping rules for cross OS path mapping
     :param boto3_session: boto3 session
-    :param logger: Click logger component
+    :param print_function_callback: Callback to print messages produced in this function.
+                Used in the CLI to print to stdout using click.echo. By default, ignores messages.
     :return: None
     """
 
@@ -47,17 +47,17 @@ def _incremental_output_download(
         pid_file_full_path = os.path.join(saved_progress_checkpoint_location, PID_FILE_NAME)
 
         # 2. Check if a download is already ongoing with pid lock checking mechanism
-        _pid_utils.check_and_obtain_pid_lock_if_available(pid_file_full_path, logger)
+        _pid_utils.check_and_obtain_pid_lock_if_available(
+            pid_file_full_path, print_function_callback
+        )
     except RuntimeError as e:
-        logger.echo(f"Download failed because of error : {e}")
+        print_function_callback(f"Download failed because of error : {e}")
         return
     except Exception as e:
-        logger.echo(
+        print_function_callback(
             f"Failed to obtain lock for download progress at {saved_progress_checkpoint_location} due to unexpected exception : {e}"
         )
         return
-
-    # TODO 3. Orchestrate the download workflow for outputs of all jobs running on queue
 
 
 def _validate_file_inputs_for_incremental_output_download(

@@ -43,15 +43,18 @@ class TestPidUtils:
             mock_exists.return_value = False
             pid: int = 1234
             mock_get_pid.return_value = pid
+            mock_obtain_lock.return_value = True
 
             expected_pid_file = os.path.join(
                 test_paths["location"], "incremental_output_download.pid"
             )
 
-            check_and_obtain_pid_lock_if_available(expected_pid_file, mock_logger)
+            result: bool = check_and_obtain_pid_lock_if_available(
+                expected_pid_file, mock_logger.echo
+            )
 
-            mock_obtain_lock.assert_called_once_with(expected_pid_file, mock_logger, 1234)
-            assert mock_logger.echo.called
+            mock_obtain_lock.assert_called_once_with(expected_pid_file, 1234, mock_logger.echo)
+            assert result is True
 
     def test_check_pid_lock_when_process_not_running(self, mock_logger, test_paths):
         """
@@ -85,7 +88,7 @@ class TestPidUtils:
             # Verify the file operations happened in the correct order
             mock_file.read.assert_called_once()
             mock_file.close.assert_called_once()
-            mock_obtain_lock.assert_called_once_with(expected_pid_file, mock_logger, 5678)
+            mock_obtain_lock.assert_called_once_with(expected_pid_file, 5678, mock_logger)
 
     def test_check_pid_lock_when_process_running(self, mock_logger, test_paths):
         """
@@ -123,7 +126,7 @@ class TestPidUtils:
         ) as mock_getpid, patch("os.replace") as mock_replace, patch("os.fsync") as mock_fsync:
             mock_getpid.return_value = test_pid
 
-            _obtain_pid_lock_atomically(pid_file, mock_logger, test_pid)
+            _obtain_pid_lock_atomically(pid_file, test_pid, mock_logger)
 
             # Verify file operations
             mock_file_open.assert_called_once_with(tmp_file, "w+")
@@ -225,7 +228,7 @@ class TestPidUtils:
             # First process obtains lock successfully
             result1 = check_and_obtain_pid_lock_if_available(pid_file_path, mock_logger)
             assert result1 is True
-            mock_obtain_lock.assert_called_once_with(pid_file_path, mock_logger, pid1)
+            mock_obtain_lock.assert_called_once_with(pid_file_path, pid1, mock_logger)
 
             # Reset mocks for second call
             mock_exists.reset_mock()

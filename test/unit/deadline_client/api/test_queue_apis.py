@@ -35,11 +35,11 @@ def test_incremental_output_download_success(mock_pid_lock, tmp_path):
         queue_id=queue_id,
         boto3_session=boto3_session,
         saved_progress_checkpoint_location=saved_progress_checkpoint_location,
-        logger=logger,
+        print_function_callback=logger.echo,
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
@@ -63,11 +63,11 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, tmp_path):
         queue_id=queue_id,
         boto3_session=boto3_session,
         saved_progress_checkpoint_location=saved_progress_checkpoint_location,
-        logger=logger,
+        print_function_callback=logger.echo,
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     logger.echo.assert_called_once_with(
         "Download failed because of error : Download already in progress"
     )
@@ -94,11 +94,11 @@ def test_incremental_output_download_generic_exception(mock_pid_lock, tmp_path):
         queue_id=queue_id,
         boto3_session=boto3_session,
         saved_progress_checkpoint_location=saved_progress_checkpoint_location,
-        logger=logger,
+        print_function_callback=logger.echo,
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     logger.echo.assert_called_once()
     assert "Failed to obtain lock for download progress" in logger.echo.call_args[0][0]
 
