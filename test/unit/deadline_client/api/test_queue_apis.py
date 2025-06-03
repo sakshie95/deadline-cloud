@@ -38,15 +38,15 @@ def test_incremental_output_download_success(
         "lastLookbackTime": "2025-04-04T05:30:00",
         "jobs": [
             {
-                "jobId": "Job-1234353453443",
+                "jobId": "job-1234353453443",
                 "sessions": [
                     {
-                        "sessionId": "Session-1324324354354",
+                        "sessionId": "session-1324324354354",
                         "sessionLifecycleStatus": "SUCCESSFUL",
                         "lastDownloadedSessActionId": 3,
                     },
                     {
-                        "sessionId": "Session-3423435435454",
+                        "sessionId": "session-3423435435454",
                         "sessionLifecycleStatus": "RUNNING",
                         "lastDownloadedSessActionId": 6,
                     },
@@ -56,7 +56,7 @@ def test_incremental_output_download_success(
                 "jobId": "Job-3234324354345",
                 "sessions": [
                     {
-                        "sessionId": "Session-4235435434345",
+                        "sessionId": "session-4235435434345",
                         "sessionLifecycleStatus": "FAILED",
                         "lastDownloadedSessActionId": 3,
                     }
@@ -78,16 +78,16 @@ def test_incremental_output_download_success(
         queue_id=queue_id,
         boto3_session=boto3_session,
         saved_progress_checkpoint_location=saved_progress_checkpoint_location,
-        logger=logger,
+        print_function_callback=logger.echo,
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
 
     mock_download_orchestrator.assert_called_once_with(
         boto3_session,
         farm_id,
-        logger,
+        logger.echo,
         None,
         queue_id,
         saved_progress_checkpoint_location,
@@ -95,7 +95,7 @@ def test_incremental_output_download_success(
         False,
     )
 
-    mock_release_lock.assert_called_once_with(pid_file_full_path, logger)
+    mock_release_lock.assert_called_once_with(pid_file_full_path, logger.echo)
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
@@ -120,16 +120,16 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, mock_release_l
         queue_id=queue_id,
         boto3_session=boto3_session,
         saved_progress_checkpoint_location=saved_progress_checkpoint_location,
-        logger=logger,
+        print_function_callback=logger.echo,
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     logger.echo.assert_called_once_with(
         "Download failed because of error : Download already in progress"
     )
-    # Verify release_pid_lock is not called when there's a RuntimeError
-    mock_release_lock.assert_not_called()
+    # Verify release_pid_lock is called always irrespective of exception
+    mock_release_lock.assert_called_once()
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
@@ -154,15 +154,15 @@ def test_incremental_output_download_generic_exception(mock_pid_lock, mock_relea
         queue_id=queue_id,
         boto3_session=boto3_session,
         saved_progress_checkpoint_location=saved_progress_checkpoint_location,
-        logger=logger,
+        print_function_callback=logger.echo,
     )
 
     # Assert
-    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger)
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     logger.echo.assert_called_once()
-    assert "Failed to obtain lock for download progress" in logger.echo.call_args[0][0]
-    # Verify release_pid_lock is not called when there's an exception
-    mock_release_lock.assert_not_called()
+    assert "Download failed from progress location" in logger.echo.call_args[0][0]
+    # Verify release_pid_lock is always called even when there's an exception
+    mock_release_lock.assert_called_once()
 
 
 @patch("os.path.isdir")

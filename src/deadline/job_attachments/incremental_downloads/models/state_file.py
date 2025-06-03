@@ -11,25 +11,25 @@ class StateFileModel:
         "jobs":
         [
             {
-                "jobId": "Job-1234353453443",
+                "jobId": "job-1234353453443",
                 "sessions": [
                 {
-                    "sessionId": "Session-1324324354354",
+                    "sessionId": "session-1324324354354",
                     "sessionLifecycleStatus": "SUCCESSFUL",
                     "lastDownloadedSessActionId": 3
                 },
                 {
-                    "sessionId": "Session-3423435435454",
+                    "sessionId": "session-3423435435454",
                     "sessionLifecycleStatus": "RUNNING",
                     "lastDownloadedSessActionId": 6
                 }
                 ]
             },
             {
-                "jobId": "Job-3234324354345",
+                "jobId": "job-3234324354345",
                 "sessions": [
                 {
-                    "sessionId": "Session-4235435434345",
+                    "sessionId": "session-4235435434345",
                     "sessionLifecycleStatus": "FAILED",
                     "lastDownloadedSessActionId": 3
                 }

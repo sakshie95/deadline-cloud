@@ -4,9 +4,8 @@ from __future__ import annotations
 __all__ = ["_incremental_output_download"]
 
 from .. import api
-from typing import Optional
+from typing import Optional, Callable
 import boto3
-from deadline.client.cli._groups.click_logger import ClickLogger
 from deadline.client import _pid_utils
 from deadline.job_attachments.incremental_downloads.orchestrator import (
     IncrementalDownloadsOrchestrator,
@@ -26,7 +25,7 @@ def _incremental_output_download(
     bootstrap_lookback_in_minutes: Optional[int] = 0,
     force_bootstrap: bool = False,
     path_mapping_rules: Optional[str] = None,
-    logger: ClickLogger = ClickLogger(False),
+    print_function_callback: Callable[[str], None] = lambda msg: None,
 ) -> None:
     """
     Download Job Output data incrementally for all jobs running on a queue as session actions finish.
@@ -41,39 +40,41 @@ def _incremental_output_download(
     :param force_bootstrap: force bootstrap and ignore current download progress. Default value is False.
     :param path_mapping_rules: path mapping rules for cross OS path mapping
     :param boto3_session: boto3 session
-    :param logger: Click logger component
+    :param print_function_callback: Callback to print messages produced in this function.
+                Used in the CLI to print to stdout using click.echo. By default, ignores messages.
     :return: None
     """
+    # 1. Construct pid file full path
+    pid_file_full_path = os.path.join(saved_progress_checkpoint_location, PID_FILE_NAME)
 
     try:
-        # 1. Construct pid file full path
-        pid_file_full_path = os.path.join(saved_progress_checkpoint_location, PID_FILE_NAME)
-
         # 2. Check if a download is already ongoing with pid lock checking mechanism
-        _pid_utils.check_and_obtain_pid_lock_if_available(pid_file_full_path, logger)
+        _pid_utils.check_and_obtain_pid_lock_if_available(
+            pid_file_full_path, print_function_callback
+        )
+
+        # 3. Orchestrate the download workflow for outputs of all jobs running on queue
+        IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow(
+            boto3_session,
+            farm_id,
+            print_function_callback,
+            path_mapping_rules,
+            queue_id,
+            saved_progress_checkpoint_location,
+            bootstrap_lookback_in_minutes,
+            force_bootstrap,
+        )
     except RuntimeError as e:
-        logger.echo(f"Download failed because of error : {e}")
+        print_function_callback(f"Download failed because of error : {e}")
         return
     except Exception as e:
-        logger.echo(
-            f"Failed to obtain lock for download progress at {saved_progress_checkpoint_location} due to unexpected exception : {e}"
+        print_function_callback(
+            f"Download failed from progress location {saved_progress_checkpoint_location} due to unexpected exception : {e}"
         )
         return
-
-    # 3. Orchestrate the download workflow for outputs of all jobs running on queue
-    IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow(
-        boto3_session,
-        farm_id,
-        logger,
-        path_mapping_rules,
-        queue_id,
-        saved_progress_checkpoint_location,
-        bootstrap_lookback_in_minutes,
-        force_bootstrap,
-    )
-
-    # 4. Release pid lock since operation is complete
-    _pid_utils.release_pid_lock(pid_file_full_path, logger)
+    finally:
+        # 4. Release pid lock since operation is complete
+        _pid_utils.release_pid_lock(pid_file_full_path, print_function_callback)
 
 
 def _validate_file_inputs_for_incremental_output_download(

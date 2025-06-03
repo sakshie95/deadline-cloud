@@ -201,7 +201,7 @@ class TestIncrementalDownloadsOrchestrator:
             result = IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow(
                 mock_boto3_session,
                 "farm-123",
-                mock_logger,
+                mock_logger.echo,
                 "path_mapping_rules",
                 "queue-123",
                 test_paths["location"],
@@ -241,19 +241,19 @@ class TestIncrementalDownloadsOrchestrator:
         # Setup
         mock_exists.return_value = True
 
-        result = IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow(
-            mock_boto3_session,
-            "farm-123",
-            mock_logger,
-            "path_mapping_rules",
-            "queue-123",
-            test_paths["location"],
-            60,
-            False,
-        )
-
         # Assert
-        assert result is False
+        with pytest.raises(Exception) as excinfo:
+            IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow(
+                mock_boto3_session,
+                "farm-123",
+                mock_logger.echo,
+                "path_mapping_rules",
+                "queue-123",
+                test_paths["location"],
+                60,
+                False,
+            )
+        assert str(excinfo.value) == "File read error"
         mock_save.assert_not_called()
 
     @patch("os.makedirs")
@@ -300,12 +300,13 @@ class TestIncrementalDownloadsOrchestrator:
         Test _save_download_progress_to_state_file when an exception occurs.
         """
         # Execute
-        IncrementalDownloadsOrchestrator._save_download_progress_to_state_file(
-            test_paths["location"],
-            test_paths["progress_file"],
-            mock_state_file_model,
-            mock_logger,
-        )
+        with pytest.raises(Exception) as excinfo:
+            IncrementalDownloadsOrchestrator._save_download_progress_to_state_file(
+                test_paths["location"],
+                test_paths["progress_file"],
+                mock_state_file_model,
+                mock_logger.echo,
+            )
 
         # Assert
-        assert "Failed to save download progress" in mock_logger.echo.call_args_list[0][0][0]
+        assert str(excinfo.value) == "Directory creation error"
