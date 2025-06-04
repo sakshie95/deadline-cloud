@@ -1,6 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 import os
+import sys
 import psutil
 from typing import Callable
 
@@ -9,10 +10,16 @@ def check_and_obtain_pid_lock_if_available(
     pid_file_full_path: str, print_function_callback: Callable[[str], None]
 ) -> bool:
     """
-    Checks if the specified pid lock file exists and if it does, it checks if the process is still running.
-    If the process is still running, it raises an exception.
-    If the process is not running, it deletes the pid lock file.
-    If the pid lock file does not exist, it creates a new one and acquires lock for this pid.
+    Checks if the specified pid lock file exists and executes as per the following:
+    If the pid lock file does not exist:
+        It creates a new pid file and acquires lock for this pid.
+        It handles concurrent processes trying to obtain lock such that only one process gets the lock and others fail
+
+    If the pid lock file exists:
+        If the process with its pid is still running, it raises an exception that a download is in progress already
+        If the process with its pid is not running it deletes the pid lock file after taking a primitive file lock on it
+        to handle concurrent processes making the same check. This will not work if primitive file locks are disabled.
+
     :param pid_file_full_path: full path of the pid lock file
     :param print_function_callback: Callback to print messages produced in this function.
                 Used in the CLI to print to stdout using click.echo. By default, ignores messages.
@@ -20,48 +27,80 @@ def check_and_obtain_pid_lock_if_available(
     """
     print_function_callback(f"Checking if another download is in progress at {pid_file_full_path}")
 
-    # Get the current process's id to obtain lock
+    # 1. Get the current process's id to obtain lock
     current_process_pid: int = os.getpid()
+    can_obtain_pid_lock: bool = False
 
     try:
-        # Check if download progress file does not exist.
+        # 2. Check if pid file does not exist at pid file path in which case we can obtain a pid lock for this process
         if not os.path.exists(pid_file_full_path):
             print_function_callback(
-                f"Download progress file does not exist at {pid_file_full_path}"
-            )
-            # Create a new pid file with the current process id
-            return _obtain_pid_lock_atomically(
-                pid_file_full_path, current_process_pid, print_function_callback
+                f"Download pid lock file does not exist at {pid_file_full_path}"
             )
 
-        # Try to open pid file at download progress location in read mode
-        with open(pid_file_full_path, "r") as f:
-            # Read pid file and obtain the process id from file contents
-            pid = f.read()
-            try:
-                # Get process using the process id
-                psutil.Process(int(pid))
-                # Process with the pid exists, so we cannot obtain a lock
-                raise RuntimeError(
-                    f"Another download is in progress at {pid_file_full_path}, use --force-bootstrap or wait for previous download to finish"
-                )
-            except psutil.NoSuchProcess:
-                # No such process exists with the process id, so we can delete the pid file
-                print_function_callback(
-                    f"Process with pid {pid} is not running. Deleting pid file."
-                )
+            can_obtain_pid_lock = True
 
-                f.close()  # Close the file before over-writing it
+        # 3. Try to read existing pid file to verify process with the pid lock is active & hasn't ended pre-maturely
+        else:
+            with open(pid_file_full_path, "r") as f:
+                pid = f.read()
+                try:
+                    psutil.Process(int(pid))
+                    # Process with the pid exists, so we cannot obtain a lock
+                    raise RuntimeError(
+                        f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
+                    )
+                except psutil.NoSuchProcess:
+                    # No such process exists with the process id, so we can delete the pid file
+                    print_function_callback(
+                        f"Process with pid {pid} is not running. Deleting pid file."
+                    )
 
-                # Create a new pid file with the current process id
-                return _obtain_pid_lock_atomically(
-                    pid_file_full_path, current_process_pid, print_function_callback
-                )
+                    # Obtain a lock on the pid file to avoid race conditions from another concurrent process
+                    # Read the pid again from the file and validate it hasn't changed since the first read
+                    # Delete the pid file
+                    _lock_pid_file_and_release_dangling_pid_lock(pid, pid_file_full_path)
+
+                    can_obtain_pid_lock = True
+
+                    f.close()  # Close the file at the end - required for windows
 
     except Exception:
-        # We already checked the file exists before reading it.
-        # For any other unexpected exceptions, we should not delete the pid file and raise an error.
+        # For any other unexpected exceptions, we should raise an error.
         raise
+
+    # 4. If we've determined we can obtain lock for this process, we do so now.
+    # We handle concurrency for processes racing for this pid lock by using atomic primitives
+    # The pid lock is obtained successfully for one process and fails for the other process
+    # We use os.rename() for windows and os.link() for linux/macOS as atomic primitives
+    if can_obtain_pid_lock:
+        # Generate a tmp file for writing the pid file as a whole and prevent corrupt data
+        tmp_file_name = pid_file_full_path + f"{current_process_pid}~tmp"
+
+        print_function_callback(
+            f"Creating new pid file at {pid_file_full_path} with pid {current_process_pid}"
+        )
+
+        # Open tmp file in write mode and write the current process id to it
+        with open(tmp_file_name, "w+") as f:
+            f.write(str(current_process_pid))
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic write to pid file while handling concurrency for parallel processes trying to race for the pid lock
+        try:
+            if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
+                os.link(tmp_file_name, pid_file_full_path)
+                os.remove(tmp_file_name)
+            else:
+                os.rename(tmp_file_name, pid_file_full_path)
+        except FileExistsError:
+            print_function_callback(
+                f"Concurrency issue when trying to obtain pid lock at {pid_file_full_path} for process id {current_process_pid}"
+            )
+            raise
+
+    return True
 
 
 def release_pid_lock(
@@ -104,35 +143,52 @@ def release_pid_lock(
         return False
 
 
-def _obtain_pid_lock_atomically(
-    pid_file_full_path: str,
-    current_process_pid: int,
-    print_function_callback: Callable[[str], None],
-) -> bool:
+def _lock_pid_file_and_release_dangling_pid_lock(pid: str, pid_file_full_path: str) -> bool:
     """
-    Obtains a lock on the pid file by writing the current process id to the file.
-    :param current_process_pid: current process's pid
-    :param pid_file_full_path: full path of pid file
-    :param print_function_callback: print_function_callback (Callable str -> None, optional): Callback to print messages produced in this function.
-                Used in the CLI to print to stdout using click.echo. By default, ignores messages.
-    :return: boolean, True if pid lock was obtained successfully
+    Helper method to lock the pid file and delete it to release a dangling pid lock for a pid which is not active
+    The primitive lock is obtained on the pid file so concurrent processes cant delete it
+    This would be caught in race conditions if primitive file locking is disabled on a customer's machine.
+    :param pid:
+    :param pid_file_full_path:
+    :return:
     """
+    file_size: int = os.path.getsize(os.path.realpath(pid_file_full_path))
+    file_locked_for_delete = open(pid_file_full_path, "r+")
+    try:
+        # Acquire an exclusive lock
+        if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
+            import fcntl
 
-    # Generate a tmp file for writing the pid file as a whole and making the pid locking atomic
-    tmp_file_name = pid_file_full_path + f"{current_process_pid}~tmp"
+            fcntl.flock(file_locked_for_delete.fileno(), fcntl.LOCK_EX)
+        else:
+            import msvcrt
 
-    # Get the current process id to write to pid file
-    text = str(current_process_pid)
+            msvcrt.locking(file_locked_for_delete.fileno(), msvcrt.LK_RLCK, file_size)
 
-    print_function_callback(f"Creating new pid file at {pid_file_full_path} with pid {text}")
+        # Verify locked file has expected data before delete
+        if pid == file_locked_for_delete.read():
+            os.remove(pid_file_full_path)  # Delete the pid file
 
-    # Open tmp file in write mode and write the current process id to it
-    with open(tmp_file_name, "w+") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
+        # If the pid changed before we locked the file to release the inactive pid lock, we throw a runtime error and exit
+        # This could happen if another concurrent process overrode the inactive pid lock before we released it.
+        else:
+            raise RuntimeError(
+                f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
+            )
+    except Exception:
+        raise
 
-    # Replace pid_file_full_path with tmp_file
-    os.replace(tmp_file_name, pid_file_full_path)
+    finally:
+        # Release the lock always
+        if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
+            import fcntl
+
+            fcntl.flock(file_locked_for_delete.fileno(), fcntl.LOCK_UN)
+        else:
+            import msvcrt
+
+            msvcrt.locking(file_locked_for_delete.fileno(), msvcrt.LK_UNLCK, file_size)
+
+        file_locked_for_delete.close()  # Close the file at the end
 
     return True

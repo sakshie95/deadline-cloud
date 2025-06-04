@@ -22,7 +22,7 @@ def test_incremental_output_download_success(mock_pid_lock, tmp_path):
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
     pid_file_full_path = os.path.join(
-        saved_progress_checkpoint_location, "incremental_output_download.pid"
+        saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )
     logger: ClickLogger = ClickLogger(is_json=False)
 
@@ -51,7 +51,7 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, tmp_path):
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
     pid_file_full_path = os.path.join(
-        saved_progress_checkpoint_location, "incremental_output_download.pid"
+        saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )
     logger = MagicMock(spec=ClickLogger)
 
@@ -69,7 +69,7 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, tmp_path):
     # Assert
     mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     logger.echo.assert_called_once_with(
-        "Download failed because of error : Download already in progress"
+        f"Another download is in progress at {saved_progress_checkpoint_location}, wait for previous download to finish"
     )
 
 
@@ -82,7 +82,7 @@ def test_incremental_output_download_generic_exception(mock_pid_lock, tmp_path):
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
     pid_file_full_path = os.path.join(
-        saved_progress_checkpoint_location, "incremental_output_download.pid"
+        saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )
     logger = MagicMock(spec=ClickLogger)
 

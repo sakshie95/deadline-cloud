@@ -44,14 +44,18 @@ def _incremental_output_download(
 
     try:
         # 1. Construct pid file full path
-        pid_file_full_path = os.path.join(saved_progress_checkpoint_location, PID_FILE_NAME)
+        pid_file_full_path = os.path.join(
+            saved_progress_checkpoint_location, f"{queue_id}_{PID_FILE_NAME}"
+        )
 
         # 2. Check if a download is already ongoing with pid lock checking mechanism
         _pid_utils.check_and_obtain_pid_lock_if_available(
             pid_file_full_path, print_function_callback
         )
-    except RuntimeError as e:
-        print_function_callback(f"Download failed because of error : {e}")
+    except RuntimeError:
+        print_function_callback(
+            f"Another download is in progress at {saved_progress_checkpoint_location}, wait for previous download to finish"
+        )
         return
     except Exception as e:
         print_function_callback(
