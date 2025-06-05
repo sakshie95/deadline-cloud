@@ -148,9 +148,11 @@ def _lock_pid_file_and_release_dangling_pid_lock(pid: str, pid_file_full_path: s
     Helper method to lock the pid file and delete it to release a dangling pid lock for a pid which is not active
     The primitive lock is obtained on the pid file so concurrent processes cant delete it
     This would be caught in race conditions if primitive file locking is disabled on a customer's machine.
-    :param pid:
-    :param pid_file_full_path:
-    :return:
+    :param pid: inactive pid in the file
+    :param pid_file_full_path: full path of the pid file
+    :return: returns True if it was able to release the inactive pid dangling lock.
+        Throws a runtime exception if the pid was updated by a different concurrent process and does not try to delete file
+        Throws an unexpected exception if we get into an error while trying to obtain lock on file.
     """
     file_size: int = os.path.getsize(os.path.realpath(pid_file_full_path))
     file_locked_for_delete = open(pid_file_full_path, "r+")
