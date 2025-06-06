@@ -6,7 +6,7 @@ import psutil
 from typing import Callable
 
 
-def check_and_obtain_pid_lock_if_available(
+def try_acquire_pid_lock(
     pid_file_full_path: str, print_function_callback: Callable[[str], None]
 ) -> bool:
     """
@@ -47,6 +47,9 @@ def check_and_obtain_pid_lock_if_available(
                 try:
                     psutil.Process(int(pid))
                     # Process with the pid exists, so we cannot obtain a lock
+                    print_function_callback(
+                        f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
+                    )
                     raise RuntimeError(
                         f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
                     )
@@ -56,14 +59,16 @@ def check_and_obtain_pid_lock_if_available(
                         f"Process with pid {pid} is not running. Deleting pid file."
                     )
 
-                    # Obtain a lock on the pid file to avoid race conditions from another concurrent process
-                    # Read the pid again from the file and validate it hasn't changed since the first read
-                    # Delete the pid file
-                    _lock_pid_file_and_release_dangling_pid_lock(pid, pid_file_full_path)
+                    f.close()  # Required for windows
+
+                    # Delete existing pid file as pid is not active
+                    # Once we've determined the process in pid file isn't running we do nothing except:
+                    # Closing file (required for windows) and deleting it
+                    # This will keep race conditions across concurrent processes trying this to be least possible without locking
+                    # TODO Try to minimize potential race conditions from concurrent processes trying to remove pid file
+                    os.remove(pid_file_full_path)
 
                     can_obtain_pid_lock = True
-
-                    f.close()  # Close the file at the end - required for windows
 
     except Exception:
         # For any other unexpected exceptions, we should raise an error.
@@ -141,56 +146,3 @@ def release_pid_lock(
             f"Process with pid {pid} is not the current process. Skipping pid file deletion."
         )
         return False
-
-
-def _lock_pid_file_and_release_dangling_pid_lock(pid: str, pid_file_full_path: str) -> bool:
-    """
-    Helper method to lock the pid file and delete it to release a dangling pid lock for a pid which is not active
-    The primitive lock is obtained on the pid file so concurrent processes cant delete it
-    This would be caught in race conditions if primitive file locking is disabled on a customer's machine.
-    :param pid: inactive pid in the file
-    :param pid_file_full_path: full path of the pid file
-    :return: returns True if it was able to release the inactive pid dangling lock.
-        Throws a runtime exception if the pid was updated by a different concurrent process and does not try to delete file
-        Throws an unexpected exception if we get into an error while trying to obtain lock on file.
-    """
-    file_size: int = os.path.getsize(os.path.realpath(pid_file_full_path))
-    file_locked_for_delete = open(pid_file_full_path, "r+")
-    try:
-        # Acquire an exclusive lock
-        if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
-            import fcntl
-
-            fcntl.flock(file_locked_for_delete.fileno(), fcntl.LOCK_EX)
-        else:
-            import msvcrt
-
-            msvcrt.locking(file_locked_for_delete.fileno(), msvcrt.LK_RLCK, file_size)
-
-        # Verify locked file has expected data before delete
-        if pid == file_locked_for_delete.read():
-            os.remove(pid_file_full_path)  # Delete the pid file
-
-        # If the pid changed before we locked the file to release the inactive pid lock, we throw a runtime error and exit
-        # This could happen if another concurrent process overrode the inactive pid lock before we released it.
-        else:
-            raise RuntimeError(
-                f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
-            )
-    except Exception:
-        raise
-
-    finally:
-        # Release the lock always
-        if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
-            import fcntl
-
-            fcntl.flock(file_locked_for_delete.fileno(), fcntl.LOCK_UN)
-        else:
-            import msvcrt
-
-            msvcrt.locking(file_locked_for_delete.fileno(), msvcrt.LK_UNLCK, file_size)
-
-        file_locked_for_delete.close()  # Close the file at the end
-
-    return True

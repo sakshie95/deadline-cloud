@@ -49,9 +49,7 @@ def _incremental_output_download(
         )
 
         # 2. Check if a download is already ongoing with pid lock checking mechanism
-        _pid_utils.check_and_obtain_pid_lock_if_available(
-            pid_file_full_path, print_function_callback
-        )
+        _pid_utils.try_acquire_pid_lock(pid_file_full_path, print_function_callback)
     except RuntimeError:
         print_function_callback(
             f"Another download is in progress at {saved_progress_checkpoint_location}, wait for previous download to finish"
