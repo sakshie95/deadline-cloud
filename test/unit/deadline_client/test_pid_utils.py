@@ -7,7 +7,7 @@ import psutil
 from unittest.mock import patch, mock_open, MagicMock
 
 from deadline.client._pid_utils import (
-    check_and_obtain_pid_lock_if_available,
+    try_acquire_pid_lock,
     _lock_pid_file_and_release_dangling_pid_lock,
 )
 
@@ -50,13 +50,29 @@ class TestPidUtils:
         mock_file.fileno.return_value = 5
         return mock_file
 
+    def setup_context_manager_mock(self, mock_file):
+        """
+        Helper method to create a proper context manager mock for file operations.
+
+        Args:
+            mock_file: The mock file object to be returned by __enter__
+
+        Returns:
+            A mock context manager that returns mock_file when __enter__ is called
+        """
+        mock_context = MagicMock()
+        mock_context.__enter__.return_value = mock_file
+        mock_context.__exit__.return_value = None
+        return mock_context
+
     def verify_common_assertions(
         self, mock_open_file, mock_file, pid_file, mock_getsize, mock_realpath
     ):
         """
         Helper method to verify common assertions across tests.
         """
-        mock_open_file.assert_called_once_with(pid_file, "r+")
+        mock_open_file.assert_called_once_with(pid_file, "a+")
+        mock_file.seek.assert_called_once_with(0)
         mock_file.read.assert_called_once()
         mock_getsize.assert_called_once_with(pid_file)
         mock_realpath.assert_called_once_with(pid_file)
@@ -81,9 +97,7 @@ class TestPidUtils:
                 test_paths["location"], "queue-12345_incremental_output_download.pid"
             )
 
-            result: bool = check_and_obtain_pid_lock_if_available(
-                expected_pid_file, mock_logger.echo
-            )
+            result: bool = try_acquire_pid_lock(expected_pid_file, mock_logger.echo)
 
             # Verify file operations for atomic write
             mock_file.assert_called_once_with(f"{expected_pid_file}{pid}~tmp", "w+")
@@ -132,7 +146,7 @@ class TestPidUtils:
                 test_paths["location"], "queue-12345_incremental_output_download.pid"
             )
 
-            check_and_obtain_pid_lock_if_available(expected_pid_file, mock_logger.echo)
+            try_acquire_pid_lock(expected_pid_file, mock_logger.echo)
 
             # Verify the file operations happened in the correct order
             mock_file.read.assert_called_once()
@@ -160,7 +174,7 @@ class TestPidUtils:
             )
 
             with pytest.raises(RuntimeError) as exc_info:
-                check_and_obtain_pid_lock_if_available(expected_pid_file, mock_logger)
+                try_acquire_pid_lock(expected_pid_file, mock_logger)
 
             assert "Unable to acquire pid lock" in str(exc_info.value)
 
@@ -179,17 +193,21 @@ class TestPidUtils:
             test_paths["location"], "queue-12345_incremental_output_download.pid"
         )
 
-        # Use the fixture for mock file
+        # Create the file mock that will be returned by __enter__
         mock_file = setup_mock_file
         mock_file.read.return_value = pid
+        mock_file.name = pid_file
+
+        # Create a proper context manager mock using helper method
+        mock_context = self.setup_context_manager_mock(mock_file)
 
         with patch("sys.platform", "linux"), patch(
-            "builtins.open", return_value=mock_file
+            "builtins.open", return_value=mock_context
         ) as mock_open_file, patch("fcntl.flock") as mock_flock, patch(
             "os.path.getsize", return_value=10
         ) as mock_getsize, patch("os.path.realpath", return_value=pid_file) as mock_realpath, patch(
             "os.remove"
-        ) as mock_remove:
+        ) as mock_remove, patch("os.path.exists", return_value=False) as mock_exists:
             result = _lock_pid_file_and_release_dangling_pid_lock(pid, pid_file)
 
             # Use helper method for common assertions
@@ -198,19 +216,9 @@ class TestPidUtils:
             )
 
             # Additional specific assertions
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_EX)  # Exclusive lock
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_UN)  # Unlock
+            mock_flock.assert_called_once_with(mock_file.fileno(), LOCK_EX)
+            mock_exists.assert_called_once_with(pid_file)
             mock_remove.assert_called_once_with(pid_file)
-            assert result is True
-
-            # Verify operations
-            mock_open_file.assert_called_once_with(pid_file, "r+")
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_EX)  # Exclusive lock
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_UN)  # Unlock
-            mock_file.read.assert_called_once()
-            mock_remove.assert_called_once_with(pid_file)
-            mock_getsize.assert_called_once_with(pid_file)
-            mock_realpath.assert_called_once_with(pid_file)
             assert result is True
 
     @pytest.mark.parametrize(
@@ -229,7 +237,7 @@ class TestPidUtils:
             mock_exists.return_value = True
 
             with pytest.raises(type(error)) as exc_info:
-                check_and_obtain_pid_lock_if_available(test_paths["location"], mock_logger)
+                try_acquire_pid_lock(test_paths["location"], mock_logger)
 
             assert str(exc_info.value) == expected_message
 
@@ -308,7 +316,7 @@ class TestPidUtils:
             mock_get_pid.return_value = pid1
 
             # First process obtains lock successfully
-            result1 = check_and_obtain_pid_lock_if_available(pid_file_path, mock_logger.echo)
+            result1 = try_acquire_pid_lock(pid_file_path, mock_logger.echo)
             assert result1 is True
 
             # Verify file operations for atomic write
@@ -334,7 +342,7 @@ class TestPidUtils:
 
             # Second process fails to obtain lock
             with pytest.raises(RuntimeError) as exc_info:
-                check_and_obtain_pid_lock_if_available(pid_file_path, mock_logger.echo)
+                try_acquire_pid_lock(pid_file_path, mock_logger.echo)
 
             assert "Unable to acquire pid lock" in str(exc_info.value)
             mock_atomic_op.assert_not_called()  # Atomic operation should not be attempted
@@ -354,17 +362,21 @@ class TestPidUtils:
             test_paths["location"], "queue-12345_incremental_output_download.pid"
         )
 
-        # Use the fixture for mock file
+        # Create the file mock that will be returned by __enter__
         mock_file = setup_mock_file
         mock_file.read.return_value = changed_pid  # Different PID than what was passed
+        mock_file.name = pid_file
+
+        # Create a proper context manager mock using helper method
+        mock_context = self.setup_context_manager_mock(mock_file)
 
         with patch("sys.platform", "win32"), patch(
-            "builtins.open", return_value=mock_file
+            "builtins.open", return_value=mock_context
         ) as mock_open_file, patch("msvcrt.locking") as mock_locking, patch(
             "os.path.getsize", return_value=10
         ) as mock_getsize, patch("os.path.realpath", return_value=pid_file) as mock_realpath, patch(
             "os.remove"
-        ) as mock_remove:
+        ) as mock_remove, patch("os.path.exists", return_value=True) as mock_exists:
             # Should raise RuntimeError because PIDs don't match
             with pytest.raises(RuntimeError) as exc_info:
                 _lock_pid_file_and_release_dangling_pid_lock(original_pid, pid_file)
@@ -377,8 +389,9 @@ class TestPidUtils:
             )
 
             # Additional specific assertions
-            mock_locking.assert_any_call(5, LK_RLCK, 10)  # Lock
-            mock_locking.assert_any_call(5, LK_UNLCK, 10)  # Unlock
+            mock_locking.assert_called_with(5, LK_RLCK, 10)  # Lock
+            mock_exists.assert_called_once_with(pid_file)
+            mock_locking.assert_called_with(5, LK_UNLCK, 10)  # Unlock
             # Should not remove the file since PIDs don't match
             mock_remove.assert_not_called()
 
@@ -403,7 +416,7 @@ class TestPidUtils:
             mock_get_pid.return_value = pid
 
             with pytest.raises(FileExistsError):
-                check_and_obtain_pid_lock_if_available(pid_file_path, mock_logger.echo)
+                try_acquire_pid_lock(pid_file_path, mock_logger.echo)
 
             # Verify file operations were attempted
             mock_file.assert_called_once_with(f"{pid_file_path}{pid}~tmp", "w+")
@@ -444,7 +457,7 @@ class TestPidUtils:
                 mock_get_pid.return_value = pid1
 
                 # Process 1 succeeds in creating the lock
-                result1 = check_and_obtain_pid_lock_if_available(pid_file_path, mock_logger.echo)
+                result1 = try_acquire_pid_lock(pid_file_path, mock_logger.echo)
 
                 # Verify process 1 operation
                 assert result1 is True
@@ -466,7 +479,7 @@ class TestPidUtils:
 
                 # Process 2 should fail with FileExistsError when trying to create the lock
                 with pytest.raises(FileExistsError):
-                    check_and_obtain_pid_lock_if_available(pid_file_path, mock_logger.echo)
+                    try_acquire_pid_lock(pid_file_path, mock_logger.echo)
 
                 # Verify process 2 operations
                 mock_open2.assert_called_once_with(f"{pid_file_path}{pid2}~tmp", "w+")
@@ -489,17 +502,21 @@ class TestPidUtils:
             test_paths["location"], "queue-12345_incremental_output_download.pid"
         )
 
-        # Use the fixture for mock file
+        # Create the file mock that will be returned by __enter__
         mock_file = setup_mock_file
         mock_file.read.return_value = pid
+        mock_file.name = pid_file
+
+        # Create a proper context manager mock using helper method
+        mock_context = self.setup_context_manager_mock(mock_file)
 
         with patch("sys.platform", "win32"), patch(
-            "builtins.open", return_value=mock_file
+            "builtins.open", return_value=mock_context
         ) as mock_open_file, patch("msvcrt.locking") as mock_locking, patch(
             "os.path.getsize", return_value=10
         ) as mock_getsize, patch("os.path.realpath", return_value=pid_file) as mock_realpath, patch(
             "os.remove"
-        ) as mock_remove:
+        ) as mock_remove, patch("os.path.exists", return_value=False) as mock_exists:
             result = _lock_pid_file_and_release_dangling_pid_lock(pid, pid_file)
 
             # Use helper method for common assertions
@@ -509,7 +526,7 @@ class TestPidUtils:
 
             # Additional specific assertions
             mock_locking.assert_any_call(5, LK_RLCK, 10)  # Lock
-            mock_locking.assert_any_call(5, LK_UNLCK, 10)  # Unlock
+            mock_exists.assert_called_once_with(pid_file)
             mock_remove.assert_called_once_with(pid_file)
             assert result is True
 
@@ -518,7 +535,7 @@ class TestPidUtils:
         reason="Test only applicable on Linux/macOS",
     )
     def test_lock_pid_file_and_release_dangling_pid_lock_different_pid_linux_mac(
-        self, mock_logger, test_paths
+        self, mock_logger, test_paths, setup_mock_file
     ):
         """
         Tests the locking and releasing of a dangling PID lock when the pid in the file has changed on Linux/macOS.
@@ -529,35 +546,45 @@ class TestPidUtils:
             test_paths["location"], "queue-12345_incremental_output_download.pid"
         )
 
-        # Create mock file object
-        mock_file = MagicMock()
+        # Create the file mock that will be returned by __enter__
+        mock_file = setup_mock_file
         mock_file.read.return_value = changed_pid  # Different PID than what was passed
-        mock_file.fileno.return_value = 5
+        mock_file.name = pid_file
+
+        # Create a proper context manager mock using helper method
+        mock_context = self.setup_context_manager_mock(mock_file)
 
         with patch("sys.platform", "linux"), patch(
-            "builtins.open", return_value=mock_file
+            "builtins.open", return_value=mock_context
         ) as mock_open_file, patch("fcntl.flock") as mock_flock, patch(
             "os.path.getsize", return_value=10
         ) as mock_getsize, patch("os.path.realpath", return_value=pid_file) as mock_realpath, patch(
             "os.remove"
-        ) as mock_remove:
+        ) as mock_remove, patch("os.path.exists", return_value=True) as mock_exists:
             # Should raise RuntimeError because PIDs don't match
             with pytest.raises(RuntimeError) as exc_info:
                 _lock_pid_file_and_release_dangling_pid_lock(original_pid, pid_file)
 
             assert "Unable to acquire pid lock" in str(exc_info.value)
 
-            # Verify operations
-            mock_open_file.assert_called_once_with(pid_file, "r+")
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_EX)  # Exclusive lock
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_UN)  # Unlock
-            mock_file.read.assert_called_once()
-            # Should not remove the file since PIDs don't match
-            mock_remove.assert_not_called()
-            mock_getsize.assert_called_once_with(pid_file)
-            mock_realpath.assert_called_once_with(pid_file)
+            # Use helper method for common assertions
+            self.verify_common_assertions(
+                mock_open_file, mock_file, pid_file, mock_getsize, mock_realpath
+            )
 
-    def test_lock_pid_file_and_release_dangling_pid_lock_exception(self, mock_logger, test_paths):
+            # Additional specific assertions
+            mock_flock.assert_any_call(mock_file.fileno(), LOCK_EX)
+            mock_exists.assert_called_once_with(pid_file)
+            mock_flock.assert_any_call(mock_file.fileno(), LOCK_UN)
+            mock_remove.assert_not_called()  # Should not remove the file since PIDs don't match
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux") and not sys.platform.startswith("darwin"),
+        reason="Test only applicable on Linux/macOS",
+    )
+    def test_lock_pid_file_and_release_dangling_pid_lock_exception(
+        self, mock_logger, test_paths, setup_mock_file
+    ):
         """
         Tests the exception handling in _lock_pid_file_and_release_dangling_pid_lock.
         """
@@ -566,25 +593,35 @@ class TestPidUtils:
             test_paths["location"], "queue-12345_incremental_output_download.pid"
         )
 
-        # Create mock file object that raises an exception when read
-        mock_file = MagicMock()
+        # Create the file mock that will be returned by __enter__
+        mock_file = setup_mock_file
         mock_file.read.side_effect = Exception("Failed to read file")
-        mock_file.fileno.return_value = 5
+        mock_file.name = pid_file
 
-        with patch("builtins.open", return_value=mock_file) as mock_open_file, patch(
+        # Create a proper context manager mock using helper method
+        mock_context = self.setup_context_manager_mock(mock_file)
+
+        with patch("sys.platform", "linux"), patch(
+            "builtins.open", return_value=mock_context
+        ) as mock_open_file, patch("fcntl.flock") as mock_flock, patch(
             "os.path.getsize", return_value=10
         ) as mock_getsize, patch("os.path.realpath", return_value=pid_file) as mock_realpath, patch(
             "os.remove"
-        ) as mock_remove:
+        ) as mock_remove, patch("os.path.exists", return_value=True) as mock_exists:
             # Should raise Exception because of the read error
-            with pytest.raises(Exception):
+            with pytest.raises(Exception) as exc_info:
                 _lock_pid_file_and_release_dangling_pid_lock(pid, pid_file)
 
+            assert "Failed to read file" in str(exc_info.value)
+
             # Verify operations
-            mock_open_file.assert_called_once_with(pid_file, "r+")
+            mock_open_file.assert_called_once_with(pid_file, "a+")
+            mock_file.seek.assert_called_once_with(0)
             mock_file.read.assert_called_once()
-            # Should not remove the file due to exception
-            mock_remove.assert_not_called()
+            mock_flock.assert_any_call(mock_file.fileno(), LOCK_EX)
+            mock_exists.assert_called_once_with(pid_file)
+            mock_flock.assert_any_call(mock_file.fileno(), LOCK_UN)
+            mock_remove.assert_not_called()  # Should not remove the file due to exception
             mock_getsize.assert_called_once_with(pid_file)
             mock_realpath.assert_called_once_with(pid_file)
 
@@ -593,7 +630,7 @@ class TestPidUtils:
         reason="Test only applicable on Linux/macOS",
     )
     def test_lock_pid_file_and_release_dangling_pid_lock_with_finally_block(
-        self, mock_logger, test_paths
+        self, mock_logger, test_paths, setup_mock_file
     ):
         """
         Tests that the finally block in _lock_pid_file_and_release_dangling_pid_lock is executed.
@@ -603,27 +640,34 @@ class TestPidUtils:
             test_paths["location"], "queue-12345_incremental_output_download.pid"
         )
 
-        # Create mock file object
-        mock_file = MagicMock()
+        # Create the file mock that will be returned by __enter__
+        mock_file = setup_mock_file
         mock_file.read.return_value = pid
-        mock_file.fileno.return_value = 5
+        mock_file.name = pid_file
+
+        # Create a proper context manager mock using helper method
+        mock_context = self.setup_context_manager_mock(mock_file)
 
         with patch("sys.platform", "linux"), patch(
-            "builtins.open", return_value=mock_file
+            "builtins.open", return_value=mock_context
         ) as mock_open_file, patch("fcntl.flock") as mock_flock, patch(
             "os.path.getsize", return_value=10
         ) as mock_getsize, patch("os.path.realpath", return_value=pid_file) as mock_realpath, patch(
             "os.remove", side_effect=Exception("Failed to remove file")
-        ) as mock_remove:
+        ) as mock_remove, patch("os.path.exists", return_value=True) as mock_exists:
             # Should raise Exception because of the remove error, but finally block should still execute
-            with pytest.raises(Exception):
+            with pytest.raises(Exception) as exc_info:
                 _lock_pid_file_and_release_dangling_pid_lock(pid, pid_file)
 
+            assert "Failed to remove file" in str(exc_info.value)
+
             # Verify operations
-            mock_open_file.assert_called_once_with(pid_file, "r+")
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_EX)  # Exclusive lock
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_UN)  # Unlock
+            mock_open_file.assert_called_once_with(pid_file, "a+")
+            mock_file.seek.assert_called_once_with(0)
             mock_file.read.assert_called_once()
+            mock_flock.assert_any_call(mock_file.fileno(), LOCK_EX)  # Exclusive lock
+            mock_exists.assert_called_once_with(pid_file)
+            mock_flock.assert_any_call(mock_file.fileno(), LOCK_UN)  # Unlock
             mock_remove.assert_called_once_with(pid_file)
             mock_getsize.assert_called_once_with(pid_file)
             mock_realpath.assert_called_once_with(pid_file)
@@ -633,7 +677,7 @@ class TestPidUtils:
         reason="Test only applicable on Linux/macOS",
     )
     def test_lock_pid_file_and_release_dangling_pid_lock_with_str_comparison(
-        self, mock_logger, test_paths
+        self, mock_logger, test_paths, setup_mock_file
     ):
         """
         Tests that the str comparison in _lock_pid_file_and_release_dangling_pid_lock works correctly.
@@ -643,25 +687,29 @@ class TestPidUtils:
             test_paths["location"], "queue-12345_incremental_output_download.pid"
         )
 
-        # Create mock file object
-        mock_file = MagicMock()
+        # Create the file mock that will be returned by __enter__
+        mock_file = setup_mock_file
         mock_file.read.return_value = "1234"  # String
-        mock_file.fileno.return_value = 5
+        mock_file.name = pid_file
+
+        # Create a proper context manager mock using helper method
+        mock_context = self.setup_context_manager_mock(mock_file)
 
         with patch("sys.platform", "linux"), patch(
-            "builtins.open", return_value=mock_file
+            "builtins.open", return_value=mock_context
         ) as mock_open_file, patch("fcntl.flock") as mock_flock, patch(
             "os.path.getsize", return_value=10
         ) as mock_getsize, patch("os.path.realpath", return_value=pid_file) as mock_realpath, patch(
             "os.remove"
-        ) as mock_remove:
+        ) as mock_remove, patch("os.path.exists", return_value=False) as mock_exists:
             result = _lock_pid_file_and_release_dangling_pid_lock(pid, pid_file)
 
             # Verify operations
-            mock_open_file.assert_called_once_with(pid_file, "r+")
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_EX)  # Exclusive lock
-            mock_flock.assert_any_call(mock_file.fileno(), LOCK_UN)  # Unlock
+            mock_open_file.assert_called_once_with(pid_file, "a+")
+            mock_file.seek.assert_called_once_with(0)
             mock_file.read.assert_called_once()
+            mock_flock.assert_called_once_with(mock_file.fileno(), LOCK_EX)  # Exclusive lock
+            mock_exists.assert_called_once_with(pid_file)
             mock_remove.assert_called_once_with(pid_file)
             mock_getsize.assert_called_once_with(pid_file)
             mock_realpath.assert_called_once_with(pid_file)

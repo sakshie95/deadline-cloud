@@ -13,7 +13,7 @@ from deadline.client.api._queue_apis import (
 from deadline.client.cli._groups.click_logger import ClickLogger
 
 
-@patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
+@patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
 def test_incremental_output_download_success(mock_pid_lock, tmp_path):
     """Test successful execution of _incremental_output_download"""
     # Arrange
@@ -42,7 +42,7 @@ def test_incremental_output_download_success(mock_pid_lock, tmp_path):
     mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
 
 
-@patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
+@patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
 def test_incremental_output_download_runtime_error(mock_pid_lock, tmp_path):
     """Test _incremental_output_download when RuntimeError is raised"""
     # Arrange
@@ -73,7 +73,7 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, tmp_path):
     )
 
 
-@patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
+@patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
 def test_incremental_output_download_generic_exception(mock_pid_lock, tmp_path):
     """Test _incremental_output_download when a generic Exception is raised"""
     # Arrange

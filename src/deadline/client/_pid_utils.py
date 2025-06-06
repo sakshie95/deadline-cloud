@@ -6,7 +6,7 @@ import psutil
 from typing import Callable
 
 
-def check_and_obtain_pid_lock_if_available(
+def try_acquire_pid_lock(
     pid_file_full_path: str, print_function_callback: Callable[[str], None]
 ) -> bool:
     """
@@ -47,6 +47,9 @@ def check_and_obtain_pid_lock_if_available(
                 try:
                     psutil.Process(int(pid))
                     # Process with the pid exists, so we cannot obtain a lock
+                    print_function_callback(
+                        f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
+                    )
                     raise RuntimeError(
                         f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
                     )
@@ -155,42 +158,49 @@ def _lock_pid_file_and_release_dangling_pid_lock(pid: str, pid_file_full_path: s
         Throws an unexpected exception if we get into an error while trying to obtain lock on file.
     """
     file_size: int = os.path.getsize(os.path.realpath(pid_file_full_path))
-    file_locked_for_delete = open(pid_file_full_path, "r+")
-    try:
-        # Acquire an exclusive lock
-        if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
-            import fcntl
 
-            fcntl.flock(file_locked_for_delete.fileno(), fcntl.LOCK_EX)
-        else:
-            import msvcrt
+    with open(pid_file_full_path, "a+") as file_locked_for_delete:
+        try:
+            # Acquire an exclusive lock
+            if sys.platform.startswith("win32") or sys.platform.startswith("cygwin"):
+                import msvcrt
 
-            msvcrt.locking(file_locked_for_delete.fileno(), msvcrt.LK_RLCK, file_size)
+                msvcrt.locking(file_locked_for_delete.fileno(), msvcrt.LK_RLCK, file_size)
 
-        # Verify locked file has expected data before delete
-        if pid == file_locked_for_delete.read():
-            os.remove(pid_file_full_path)  # Delete the pid file
+            else:
+                import fcntl
 
-        # If the pid changed before we locked the file to release the inactive pid lock, we throw a runtime error and exit
-        # This could happen if another concurrent process overrode the inactive pid lock before we released it.
-        else:
-            raise RuntimeError(
-                f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
-            )
-    except Exception:
-        raise
+                fcntl.flock(file_locked_for_delete.fileno(), fcntl.LOCK_EX)
 
-    finally:
-        # Release the lock always
-        if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
-            import fcntl
+            # This is required to read the contents of the original file opened in write/append mode in Windows
+            file_locked_for_delete.seek(0)
 
-            fcntl.flock(file_locked_for_delete.fileno(), fcntl.LOCK_UN)
-        else:
-            import msvcrt
+            # Verify locked file has expected data before delete
+            if pid == str(file_locked_for_delete.read()):
+                # Need to close the file for deleting it in Windows
+                file_locked_for_delete.close()
+                os.remove(file_locked_for_delete.name)  # Delete the pid file
 
-            msvcrt.locking(file_locked_for_delete.fileno(), msvcrt.LK_UNLCK, file_size)
+            # If the pid changed before we locked the file to release the inactive pid lock, we throw a runtime error and exit
+            # This could happen if another concurrent process overrode the inactive pid lock before we released it.
+            else:
+                raise RuntimeError(
+                    f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
+                )
 
-        file_locked_for_delete.close()  # Close the file at the end
+        finally:
+            # Release the lock always if the file hasn't been deleted by this process already
+            if os.path.exists(file_locked_for_delete.name):
+                if sys.platform.startswith("win32"):
+                    import msvcrt
+
+                    msvcrt.locking(file_locked_for_delete.fileno(), msvcrt.LK_UNLCK, file_size)
+
+                else:
+                    import fcntl
+
+                    fcntl.flock(file_locked_for_delete.fileno(), fcntl.LOCK_UN)
+
+            file_locked_for_delete.close()  # Close the file at the end, always required for Windows
 
     return True
