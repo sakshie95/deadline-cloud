@@ -16,6 +16,7 @@ from deadline.job_attachments.incremental_downloads.incremental_download_state i
 import datetime
 
 import os
+from deadline.job_attachments.incremental_downloads.exceptions import PidLockAlreadyHeld
 
 PID_FILE_NAME = "incremental_output_download.pid"
 DOWNLOAD_PROGRESS_FILE_NAME = "download_progress.json"
@@ -91,6 +92,8 @@ def _incremental_output_download(
         )
 
     except RuntimeError:
+        _pid_utils.try_acquire_pid_lock(pid_file_full_path, print_function_callback)
+    except PidLockAlreadyHeld:
         print_function_callback(
             f"Another download is in progress at {saved_progress_checkpoint_location}, wait for previous download to finish"
         )

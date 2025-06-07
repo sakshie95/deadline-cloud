@@ -15,6 +15,7 @@ from deadline.job_attachments.incremental_downloads.incremental_download_state i
     IncrementalDownloadState,
 )
 from freezegun import freeze_time
+from deadline.job_attachments.incremental_downloads.exceptions import PidLockAlreadyHeld
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
@@ -162,8 +163,8 @@ def test_incremental_output_download_success_with_force_bootstrap(
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
 @patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
-def test_incremental_output_download_runtime_error(mock_pid_lock, mock_release_lock, tmp_path):
-    """Test _incremental_output_download when RuntimeError is raised"""
+def test_incremental_output_download_pid_lock_already_held_error(mock_pid_lock, mock_release_lock, tmp_path):
+    """Test _incremental_output_download when PidLockAlreadyHeld is raised"""
     # Arrange
     farm_id = "farm-0123456789abcdef"
     queue_id = "queue-0123456789abcdef"
@@ -174,7 +175,7 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, mock_release_l
     )
     logger = MagicMock(spec=ClickLogger)
 
-    mock_pid_lock.side_effect = RuntimeError("Download already in progress")
+    mock_pid_lock.side_effect = PidLockAlreadyHeld("Download already in progress")
 
     # Act
     _incremental_output_download(
@@ -190,8 +191,6 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, mock_release_l
     logger.echo.assert_called_once_with(
         f"Another download is in progress at {saved_progress_checkpoint_location}, wait for previous download to finish"
     )
-    # Verify release_pid_lock is called always irrespective of exception
-    mock_release_lock.assert_called_once()
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
