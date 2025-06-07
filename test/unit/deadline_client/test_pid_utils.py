@@ -3,10 +3,10 @@
 import os
 import sys
 import pytest
-import psutil
 from unittest.mock import patch, mock_open, MagicMock
 
 from deadline.client._pid_utils import try_acquire_pid_lock
+from deadline.job_attachments.incremental_downloads.exceptions import PidLockAlreadyHeld
 
 
 class TestPidUtils:
@@ -116,9 +116,11 @@ class TestPidUtils:
         mock_cm = MagicMock()
         mock_cm.__enter__.return_value = mock_file
 
-        with patch("os.path.exists") as mock_exists, patch("psutil.Process") as mock_process, patch(
-            "builtins.open", return_value=mock_cm
-        ) as mock_open, patch("os.getpid") as mock_get_pid, patch("os.fsync") as mock_fsync, patch(
+        with patch("os.path.exists") as mock_exists, patch(
+            "psutil.pid_exists"
+        ) as mock_process, patch("builtins.open", return_value=mock_cm) as mock_open, patch(
+            "os.getpid"
+        ) as mock_get_pid, patch("os.fsync") as mock_fsync, patch(
             "os.link"
             if sys.platform.startswith("linux") or sys.platform.startswith("darwin")
             else "os.rename"
@@ -126,7 +128,7 @@ class TestPidUtils:
             mock_exists.return_value = True
             pid: int = 5678
             mock_get_pid.return_value = pid
-            mock_process.side_effect = psutil.NoSuchProcess(1234)
+            mock_process.return_value = False
 
             expected_pid_file = os.path.join(
                 test_paths["location"], "queue-12345_incremental_output_download.pid"
@@ -161,17 +163,17 @@ class TestPidUtils:
         Tests when PID file exists and process is running.
         This is the case when there is a run already ongoing for the CLI so the new one needs to be terminated.
         """
-        with patch("os.path.exists") as mock_exists, patch("psutil.Process") as mock_process, patch(
-            "builtins.open", mock_open(read_data="1234")
-        ):
+        with patch("os.path.exists") as mock_exists, patch(
+            "psutil.pid_exists"
+        ) as mock_process, patch("builtins.open", mock_open(read_data="1234")):
             mock_exists.return_value = True
-            mock_process.return_value = MagicMock()  # Process exists
+            mock_process.return_value = True  # Process exists
 
             expected_pid_file = os.path.join(
                 test_paths["location"], "queue-12345_incremental_output_download.pid"
             )
 
-            with pytest.raises(RuntimeError) as exc_info:
+            with pytest.raises(PidLockAlreadyHeld) as exc_info:
                 try_acquire_pid_lock(expected_pid_file, mock_logger)
 
             assert "Unable to acquire pid lock" in str(exc_info.value)
@@ -259,7 +261,7 @@ class TestPidUtils:
         # Mock file operations and process checks
         with patch("os.path.exists") as mock_exists, patch(
             "builtins.open", mock_open(read_data=str(pid1))
-        ) as mock_file, patch("psutil.Process") as mock_process, patch(
+        ) as mock_file, patch("psutil.pid_exists") as mock_process, patch(
             "os.getpid"
         ) as mock_get_pid, patch("os.fsync") as mock_fsync, patch(
             "os.link"
@@ -293,10 +295,10 @@ class TestPidUtils:
 
             # Second call - file exists, process is running
             mock_exists.side_effect = [True]  # Second PID file exists
-            mock_process.return_value = MagicMock()  # Process exists/is running
+            mock_process.return_value = True  # Process exists/is running
 
             # Second process fails to obtain lock
-            with pytest.raises(RuntimeError) as exc_info:
+            with pytest.raises(PidLockAlreadyHeld) as exc_info:
                 try_acquire_pid_lock(pid_file_path, mock_logger.echo)
 
             assert "Unable to acquire pid lock" in str(exc_info.value)

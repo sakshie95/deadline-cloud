@@ -4,6 +4,7 @@ import os
 import sys
 import psutil
 from typing import Callable
+from deadline.job_attachments.incremental_downloads.exceptions import PidLockAlreadyHeld
 
 
 def try_acquire_pid_lock(
@@ -44,31 +45,26 @@ def try_acquire_pid_lock(
         else:
             with open(pid_file_full_path, "r") as f:
                 pid = f.read()
-                try:
-                    psutil.Process(int(pid))
-                    # Process with the pid exists, so we cannot obtain a lock
-                    print_function_callback(
-                        f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
-                    )
-                    raise RuntimeError(
-                        f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
-                    )
-                except psutil.NoSuchProcess:
-                    # No such process exists with the process id, so we can delete the pid file
-                    print_function_callback(
-                        f"Process with pid {pid} is not running. Deleting pid file."
-                    )
-
+                # Check if a process does not exist with the process id, so we can delete the pid file
+                # Once we've determined the process in pid file isn't running we close the file and delete it
+                # This will keep race conditions across concurrent processes trying this to be least possible without locking
+                # TODO Try to minimize potential race conditions from concurrent processes trying to remove pid file
+                if not psutil.pid_exists(int(pid)):
                     f.close()  # Required for windows
-
-                    # Delete existing pid file as pid is not active
-                    # Once we've determined the process in pid file isn't running we do nothing except:
-                    # Closing file (required for windows) and deleting it
-                    # This will keep race conditions across concurrent processes trying this to be least possible without locking
-                    # TODO Try to minimize potential race conditions from concurrent processes trying to remove pid file
                     os.remove(pid_file_full_path)
-
+                    print_function_callback(
+                        f"Process with pid {pid} is not running. Deleted pid file."
+                    )
                     can_obtain_pid_lock = True
+
+                # Process with the pid in the file is active
+                else:
+                    print_function_callback(
+                        f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
+                    )
+                    raise PidLockAlreadyHeld(
+                        f"Unable to acquire pid lock as process with pid {pid} exists on {pid_file_full_path}"
+                    )
 
     except Exception:
         # For any other unexpected exceptions, we should raise an error.
@@ -94,11 +90,11 @@ def try_acquire_pid_lock(
 
         # Atomic write to pid file while handling concurrency for parallel processes trying to race for the pid lock
         try:
-            if sys.platform.startswith("linux") or sys.platform.startswith("darwin"):
+            if sys.platform.startswith("win32") or sys.platform.startswith("cygwin"):
+                os.rename(tmp_file_name, pid_file_full_path)
+            else:
                 os.link(tmp_file_name, pid_file_full_path)
                 os.remove(tmp_file_name)
-            else:
-                os.rename(tmp_file_name, pid_file_full_path)
         except FileExistsError:
             print_function_callback(
                 f"Concurrency issue when trying to obtain pid lock at {pid_file_full_path} for process id {current_process_pid}"
