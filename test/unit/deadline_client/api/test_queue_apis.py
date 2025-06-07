@@ -2,7 +2,6 @@
 
 
 import os
-import json
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -12,24 +11,31 @@ from deadline.client.api._queue_apis import (
     _validate_file_inputs_for_incremental_output_download,
 )
 from deadline.client.cli._groups.click_logger import ClickLogger
+from deadline.job_attachments.incremental_downloads.incremental_download_state import (
+    IncrementalDownloadState,
+)
+from freezegun import freeze_time
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
-@patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
-@patch(
-    "deadline.client.api._queue_apis.IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow"
-)
-def test_incremental_output_download_success(
-    mock_download_orchestrator, mock_pid_lock, mock_release_lock, tmp_path
+@patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
+@patch("deadline.client.api._queue_apis.load_progress_from_state_file")
+@patch("deadline.client.api._queue_apis.save_progress_to_state_file")
+@freeze_time("2025-05-26 12:00:00")
+def test_incremental_output_download_success_load_from_progress(
+    mock_save_progress, mock_load_progress, mock_acquire_pid_lock, mock_release_pid_lock, tmp_path
 ):
-    """Test successful execution of _incremental_output_download"""
+    """Test successful execution of _incremental_output_download with loading progress from state file"""
     # Arrange
     farm_id = "farm-0123456789abcdef"
     queue_id = "queue-0123456789abcdef"
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
     pid_file_full_path = os.path.join(
-        saved_progress_checkpoint_location, "incremental_output_download.pid"
+        saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
+    )
+    saved_progress_checkpoint_full_path: str = os.path.join(
+        saved_progress_checkpoint_location, f"{queue_id}_download_progress.json"
     )
     logger: ClickLogger = ClickLogger(is_json=False)
 
@@ -65,12 +71,12 @@ def test_incremental_output_download_success(
         ],
     }
 
-    # make directory
-    os.mkdir(saved_progress_checkpoint_location)
-
-    # Create file at saved_progress_checkpoint_location with contents as StateFileModel
-    with open(f"{saved_progress_checkpoint_location}/download_progress.json", "w+") as f:
-        f.write(json.dumps(download_progress_json))
+    expected_current_download_progress: IncrementalDownloadState = (
+        IncrementalDownloadState.from_dict(download_progress_json)
+    )
+    mock_load_progress.return_value = expected_current_download_progress
+    expected_updated_download_progress = expected_current_download_progress
+    expected_updated_download_progress.last_lookback_time = "2025-05-26T12:00:00Z"
 
     # Act
     _incremental_output_download(
@@ -81,25 +87,81 @@ def test_incremental_output_download_success(
         print_function_callback=logger.echo,
     )
 
-    # Assert
-    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
-
-    mock_download_orchestrator.assert_called_once_with(
-        boto3_session,
-        farm_id,
-        logger.echo,
-        None,
-        queue_id,
+    # Assert the calls were made in expected order
+    mock_acquire_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
+    mock_load_progress.assert_called_once_with(saved_progress_checkpoint_full_path, logger.echo)
+    mock_save_progress.assert_called_once_with(
         saved_progress_checkpoint_location,
-        0,
-        False,
+        saved_progress_checkpoint_full_path,
+        expected_updated_download_progress,
+        logger.echo,
     )
 
-    mock_release_lock.assert_called_once_with(pid_file_full_path, logger.echo)
+    mock_release_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
+
+
+@pytest.mark.parametrize("mock_bootstrap_lookback_in_minutes", [60, None])
+@patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
+@patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
+@patch("deadline.client.api._queue_apis.bootstrap_fresh_state")
+@patch("deadline.client.api._queue_apis.save_progress_to_state_file")
+def test_incremental_output_download_success_with_force_bootstrap(
+    mock_save_progress,
+    mock_bootstrap_fresh_state,
+    mock_acquire_pid_lock,
+    mock_release_pid_lock,
+    tmp_path,
+    mock_bootstrap_lookback_in_minutes,
+):
+    """Test successful execution of _incremental_output_download with bootstrapping"""
+    # Arrange
+    farm_id = "farm-0123456789abcdef"
+    queue_id = "queue-0123456789abcdef"
+    boto3_session = MagicMock(spec=boto3.Session)
+    saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
+    pid_file_full_path = os.path.join(
+        saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
+    )
+    saved_progress_checkpoint_full_path: str = os.path.join(
+        saved_progress_checkpoint_location, f"{queue_id}_download_progress.json"
+    )
+    logger: ClickLogger = ClickLogger(is_json=False)
+
+    # Set all assumptions
+    expected_current_download_progress: IncrementalDownloadState = IncrementalDownloadState()
+    expected_current_download_progress.last_lookback_time = "2025-05-26T11:00:00Z"
+    mock_bootstrap_fresh_state.return_value = expected_current_download_progress
+    expected_updated_download_progress = expected_current_download_progress
+    expected_updated_download_progress.last_lookback_time = "2025-05-26T12:00:00Z"
+
+    # Act
+    _incremental_output_download(
+        farm_id=farm_id,
+        queue_id=queue_id,
+        boto3_session=boto3_session,
+        saved_progress_checkpoint_location=saved_progress_checkpoint_location,
+        bootstrap_lookback_in_minutes=mock_bootstrap_lookback_in_minutes,
+        print_function_callback=logger.echo,
+        force_bootstrap=True,
+    )
+
+    # Assert the calls were made in expected order
+    mock_acquire_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
+    mock_bootstrap_fresh_state.assert_called_once_with(
+        mock_bootstrap_lookback_in_minutes, logger.echo
+    )
+    mock_save_progress.assert_called_once_with(
+        saved_progress_checkpoint_location,
+        saved_progress_checkpoint_full_path,
+        expected_updated_download_progress,
+        logger.echo,
+    )
+
+    mock_release_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
-@patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
+@patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
 def test_incremental_output_download_runtime_error(mock_pid_lock, mock_release_lock, tmp_path):
     """Test _incremental_output_download when RuntimeError is raised"""
     # Arrange
@@ -108,7 +170,7 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, mock_release_l
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
     pid_file_full_path = os.path.join(
-        saved_progress_checkpoint_location, "incremental_output_download.pid"
+        saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )
     logger = MagicMock(spec=ClickLogger)
 
@@ -126,14 +188,14 @@ def test_incremental_output_download_runtime_error(mock_pid_lock, mock_release_l
     # Assert
     mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     logger.echo.assert_called_once_with(
-        "Download failed because of error : Download already in progress"
+        f"Another download is in progress at {saved_progress_checkpoint_location}, wait for previous download to finish"
     )
     # Verify release_pid_lock is called always irrespective of exception
     mock_release_lock.assert_called_once()
 
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
-@patch("deadline.client.api._queue_apis._pid_utils.check_and_obtain_pid_lock_if_available")
+@patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
 def test_incremental_output_download_generic_exception(mock_pid_lock, mock_release_lock, tmp_path):
     """Test _incremental_output_download when a generic Exception is raised"""
     # Arrange
@@ -142,7 +204,7 @@ def test_incremental_output_download_generic_exception(mock_pid_lock, mock_relea
     boto3_session = MagicMock(spec=boto3.Session)
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
     pid_file_full_path = os.path.join(
-        saved_progress_checkpoint_location, "incremental_output_download.pid"
+        saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )
     logger = MagicMock(spec=ClickLogger)
 
@@ -160,7 +222,7 @@ def test_incremental_output_download_generic_exception(mock_pid_lock, mock_relea
     # Assert
     mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     logger.echo.assert_called_once()
-    assert "Download failed from progress location" in logger.echo.call_args[0][0]
+    assert "Failed to obtain lock for download progress" in logger.echo.call_args[0][0]
     # Verify release_pid_lock is always called even when there's an exception
     mock_release_lock.assert_called_once()
 

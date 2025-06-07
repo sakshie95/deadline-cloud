@@ -7,13 +7,18 @@ from .. import api
 from typing import Optional, Callable
 import boto3
 from deadline.client import _pid_utils
-from deadline.job_attachments.incremental_downloads.orchestrator import (
-    IncrementalDownloadsOrchestrator,
+from deadline.job_attachments.incremental_downloads.incremental_download_state import (
+    IncrementalDownloadState,
+    bootstrap_fresh_state,
+    load_progress_from_state_file,
+    save_progress_to_state_file,
 )
+import datetime
 
 import os
 
 PID_FILE_NAME = "incremental_output_download.pid"
+DOWNLOAD_PROGRESS_FILE_NAME = "download_progress.json"
 
 
 @api.record_function_latency_telemetry_event()
@@ -45,31 +50,54 @@ def _incremental_output_download(
     :return: None
     """
     # 1. Construct pid file full path
-    pid_file_full_path = os.path.join(saved_progress_checkpoint_location, PID_FILE_NAME)
+    pid_file_full_path = os.path.join(
+        saved_progress_checkpoint_location, f"{queue_id}_{PID_FILE_NAME}"
+    )
 
     try:
         # 2. Check if a download is already ongoing with pid lock checking mechanism
-        _pid_utils.check_and_obtain_pid_lock_if_available(
-            pid_file_full_path, print_function_callback
+        _pid_utils.try_acquire_pid_lock(pid_file_full_path, print_function_callback)
+
+        # Construct the saved progress checkpoint full path
+        saved_progress_checkpoint_full_path: str = os.path.join(
+            saved_progress_checkpoint_location, f"{queue_id}_{DOWNLOAD_PROGRESS_FILE_NAME}"
+        )
+        current_download_progress: IncrementalDownloadState = IncrementalDownloadState()
+
+        # 3. If bootstrap is required, then bootstrap using helper function
+        if force_bootstrap:
+            current_download_progress = bootstrap_fresh_state(
+                bootstrap_lookback_in_minutes,
+                print_function_callback,
+            )
+
+        # 4. If progress is available, load from the incremental download state file
+        else:
+            current_download_progress = load_progress_from_state_file(
+                saved_progress_checkpoint_full_path, print_function_callback
+            )
+
+        # 5. Download outputs for ongoing jobs using current download progress
+        # Right now it is set to no change in progress except setting the last lookback time to now
+        updated_download_progress: IncrementalDownloadState = current_download_progress
+        updated_download_progress.last_lookback_time = datetime.datetime.utcnow().isoformat() + "Z"
+
+        # 6. Save progress to incremental download state file
+        save_progress_to_state_file(
+            saved_progress_checkpoint_location,
+            saved_progress_checkpoint_full_path,
+            updated_download_progress,
+            print_function_callback,
         )
 
-        # 3. Orchestrate the download workflow for outputs of all jobs running on queue
-        IncrementalDownloadsOrchestrator.orchestrate_download_outputs_workflow(
-            boto3_session,
-            farm_id,
-            print_function_callback,
-            path_mapping_rules,
-            queue_id,
-            saved_progress_checkpoint_location,
-            bootstrap_lookback_in_minutes,
-            force_bootstrap,
+    except RuntimeError:
+        print_function_callback(
+            f"Another download is in progress at {saved_progress_checkpoint_location}, wait for previous download to finish"
         )
-    except RuntimeError as e:
-        print_function_callback(f"Download failed because of error : {e}")
         return
     except Exception as e:
         print_function_callback(
-            f"Download failed from progress location {saved_progress_checkpoint_location} due to unexpected exception : {e}"
+            f"Failed to obtain lock for download progress at {saved_progress_checkpoint_location} due to unexpected exception : {e}"
         )
         return
     finally:
