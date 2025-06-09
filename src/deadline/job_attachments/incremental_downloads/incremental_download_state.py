@@ -3,7 +3,90 @@
 import json
 import os
 import datetime
-from typing import Optional, Callable
+from typing import Optional, Callable, List, Dict, Any, Set
+
+
+class JobSession:
+    """
+    Model representing a job session in the download progress state.
+    """
+
+    def __init__(
+        self, session_id: str, session_lifecycle_status: str, last_downloaded_sess_action_id: int
+    ):
+        """
+        Initialize a JobSession instance.
+        Args:
+            session_id (str): The ID of the session
+            session_lifecycle_status (str): The lifecycle status of the session
+            last_downloaded_sess_action_id (int): The ID of the last downloaded session action
+        """
+        self.session_id = session_id
+        self.session_lifecycle_status = session_lifecycle_status
+        self.last_downloaded_sess_action_id = last_downloaded_sess_action_id
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]):
+        """
+        Create a JobSession instance from a dictionary.
+        Args:
+            data (dict): Dictionary containing session data
+        Returns:
+            JobSession: A new instance populated with the data
+        """
+        return cls(
+            session_id=str(data.get("sessionId", "")),
+            session_lifecycle_status=str(data.get("sessionLifecycleStatus", "")),
+            last_downloaded_sess_action_id=int(data.get("lastDownloadedSessActionId", 0)),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert the JobSession to a dictionary.
+        Returns:
+            dict: Dictionary representation of the session
+        """
+        return {
+            "sessionId": self.session_id,
+            "sessionLifecycleStatus": self.session_lifecycle_status,
+            "lastDownloadedSessActionId": self.last_downloaded_sess_action_id,
+        }
+
+
+class Job:
+    """
+    Model representing a job in the download progress state.
+    """
+
+    def __init__(self, job_id: str, sessions: Optional[List[JobSession]] = None):
+        """
+        Initialize a Job instance.
+        Args:
+            job_id (str): The ID of the job
+            sessions (list): List of JobSession objects
+        """
+        self.job_id = job_id
+        self.sessions = sessions or []
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]):
+        """
+        Create a Job instance from a dictionary.
+        Args:
+            data (dict): Dictionary containing job data
+        Returns:
+            Job: A new instance populated with the data
+        """
+        sessions = [JobSession.from_dict(session) for session in data.get("sessions", [])]
+        return cls(job_id=str(data.get("jobId", "")), sessions=sessions)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert the Job to a dictionary.
+        Returns:
+            dict: Dictionary representation of the job
+        """
+        return {"jobId": self.job_id, "sessions": [session.to_dict() for session in self.sessions]}
 
 
 class IncrementalDownloadState:
@@ -43,15 +126,18 @@ class IncrementalDownloadState:
     }
     """
 
-    def __init__(self, last_lookback_time=None, jobs=None):
+    last_lookback_time: str = ""
+    jobs: List[Job] = []
+
+    def __init__(self, last_lookback_time: str = "", jobs: List[Job] = []):
         """
         Initialize a IncrementalDownloadState instance.
         Args:
             last_lookback_time (str): ISO format timestamp of the last lookback time
-            jobs (list): List of job dictionaries containing job_id and sessions information
+            jobs (list): List of Jobs containing job_id and sessions information
         """
         self.last_lookback_time = last_lookback_time
-        self.jobs = jobs or []
+        self.jobs = jobs
 
     @classmethod
     def from_dict(cls, data):
@@ -65,7 +151,10 @@ class IncrementalDownloadState:
         if not data:
             return cls()
 
-        return cls(last_lookback_time=data.get("lastLookbackTime"), jobs=data.get("jobs", []))
+        jobs_data = data.get("jobs", [])
+        jobs = [Job.from_dict(job) for job in jobs_data]
+
+        return cls(last_lookback_time=data.get("lastLookbackTime"), jobs=jobs)
 
     def to_dict(self):
         """
@@ -73,7 +162,21 @@ class IncrementalDownloadState:
         Returns:
             dict: Dictionary representation of the state file model
         """
-        return {"lastLookbackTime": self.last_lookback_time, "jobs": self.jobs}
+        return {
+            "lastLookbackTime": self.last_lookback_time,
+            "jobs": [job.to_dict() for job in self.jobs],
+        }
+
+    def get_job_ids(self) -> Set[str]:
+        """
+        Get a set of all job IDs in the state.
+        Returns:
+            Set[str]: Set of job IDs
+        """
+        return {job.job_id for job in self.jobs}
+
+    def get_last_lookback_time(self) -> str:
+        return self.last_lookback_time
 
 
 def bootstrap_fresh_state(
@@ -91,9 +194,10 @@ def bootstrap_fresh_state(
     print_function_callback(
         "Bootstrapping command. Ignoring download progress location and creating new"
     )
-    current_download_progress.last_lookback_time = datetime.datetime.utcnow() - datetime.timedelta(
-        minutes=float(bootstrap_lookback_in_minutes or 0)
-    )
+    current_download_progress.last_lookback_time = (
+        datetime.datetime.utcnow()
+        - datetime.timedelta(minutes=float(bootstrap_lookback_in_minutes or 0))
+    ).isoformat()
     return current_download_progress
 
 

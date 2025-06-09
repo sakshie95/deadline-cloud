@@ -77,7 +77,7 @@ def test_incremental_output_download_success_load_from_progress(
     )
     mock_load_progress.return_value = expected_current_download_progress
     expected_updated_download_progress = expected_current_download_progress
-    expected_updated_download_progress.last_lookback_time = "2025-05-26T12:00:00Z"
+    expected_updated_download_progress.last_lookback_time = "2025-05-26T12:00:00"
 
     # Act
     _incremental_output_download(
@@ -130,10 +130,10 @@ def test_incremental_output_download_success_with_force_bootstrap(
 
     # Set all assumptions
     expected_current_download_progress: IncrementalDownloadState = IncrementalDownloadState()
-    expected_current_download_progress.last_lookback_time = "2025-05-26T11:00:00Z"
+    expected_current_download_progress.last_lookback_time = "2025-05-26T11:00:00"
     mock_bootstrap_fresh_state.return_value = expected_current_download_progress
     expected_updated_download_progress = expected_current_download_progress
-    expected_updated_download_progress.last_lookback_time = "2025-05-26T12:00:00Z"
+    expected_updated_download_progress.last_lookback_time = "2025-05-26T12:00:00"
 
     # Act
     _incremental_output_download(
@@ -163,7 +163,9 @@ def test_incremental_output_download_success_with_force_bootstrap(
 
 @patch("deadline.client.api._queue_apis._pid_utils.release_pid_lock")
 @patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
-def test_incremental_output_download_pid_lock_already_held_error(mock_pid_lock, mock_release_lock, tmp_path):
+def test_incremental_output_download_pid_lock_already_held_error(
+    mock_pid_lock, mock_release_lock, tmp_path
+):
     """Test _incremental_output_download when PidLockAlreadyHeld is raised"""
     # Arrange
     farm_id = "farm-0123456789abcdef"

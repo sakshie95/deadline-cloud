@@ -4,74 +4,79 @@ import os
 import json
 import pytest
 from unittest.mock import patch, MagicMock, mock_open
+from typing import Dict, Any, List, cast
 
 from deadline.job_attachments.incremental_downloads.incremental_download_state import (
     IncrementalDownloadState,
     bootstrap_fresh_state,
+    Job,
+    JobSession,
     load_progress_from_state_file,
     save_progress_to_state_file,
 )
 from freezegun import freeze_time
 
 
+@pytest.fixture
+def mock_logger():
+    """
+    Fixture to create a mock logger.
+    """
+    mock_logger = MagicMock()
+    mock_logger.echo = MagicMock()
+    return mock_logger
+
+
+@pytest.fixture
+def test_paths():
+    """
+    Fixture to create test paths.
+    """
+    return {
+        "checkpoint_location": "/tmp/checkpoint",
+        "checkpoint_full_path": "/tmp/checkpoint/state.json",
+    }
+
+
+@pytest.fixture
+def mock_state():
+    """
+    Fixture to create a mock IncrementalDownloadState.
+    """
+    model = IncrementalDownloadState()
+    model.last_lookback_time = "2023-01-01T00:00:00"
+
+    job = Job(job_id="job-123")
+    session = JobSession(
+        session_id="session-123",
+        session_lifecycle_status="RUNNING",
+        last_downloaded_sess_action_id=5,
+    )
+    job.sessions = [session]
+    model.jobs = [job]
+    return model
+
+
 class TestIncrementalDownloadState:
-    @pytest.fixture
-    def mock_logger(self):
-        """
-        Fixture to create a mock logger object.
-        """
-        logger = MagicMock()
-        logger.echo = MagicMock()
-        return logger
+    """Test cases for IncrementalDownloadState."""
 
-    @pytest.fixture
-    def test_paths(self):
-        """
-        Fixture to provide test file paths.
-        """
-        location = "/path/to/download/location"
-        return {
-            "location": location,
-            "progress_file": os.path.join(location, "download_progress.json"),
-        }
-
-    @pytest.fixture
-    def mock_state(self):
-        """
-        Fixture to create a mock IncrementalDownloadState.
-        """
-        model = IncrementalDownloadState()
-        model.last_lookback_time = "2023-01-01T00:00:00Z"
-        model.jobs = [
-            {
-                "jobId": "job-123",
-                "sessions": [
-                    {
-                        "sessionId": "session-123",
-                        "sessionLifecycleStatus": "RUNNING",
-                        "lastDownloadedSessActionId": 5,
-                    }
-                ],
-            }
-        ]
-        return model
-
+    @patch("datetime.datetime")
     @freeze_time("2025-05-26 12:00:00")
-    def test_bootstrap_fresh_state(self, mock_logger):
+    def test_bootstrap_fresh_state(self, mock_datetime, mock_logger):
         """
         Test bootstrap_fresh_state with lookback minutes.
         """
-        # Setup
+        # Arrange
         bootstrap_lookback_in_minutes = 60
 
-        # Execute
+        # Act
         result = bootstrap_fresh_state(
             bootstrap_lookback_in_minutes,
             mock_logger.echo,
         )
 
         # Assert
-        assert result.last_lookback_time.isoformat() == "2025-05-26T11:00:00"
+        assert result.last_lookback_time == "2025-05-26T11:00:00"
         assert result.jobs == []
 
     @freeze_time("2025-05-26 12:00:00")
@@ -79,162 +84,111 @@ class TestIncrementalDownloadState:
         """
         Test bootstrap_fresh_state without lookback minutes.
         """
-        # Execute
+        # Act
         result = bootstrap_fresh_state(
             None,
             mock_logger.echo,
         )
 
         # Assert
-        assert result.last_lookback_time.isoformat() == "2025-05-26T12:00:00"
+        assert result.last_lookback_time == "2025-05-26T12:00:00"
         assert result.jobs == []
 
     def test_load_progress_from_state_file(self, mock_logger, mock_state, test_paths):
         """
         Test load_progress_from_state_file successfully loads the state file.
         """
-        state_dict = mock_state.to_dict()
+        # Arrange
+        mock_open_obj = mock_open(read_data=json.dumps(mock_state.to_dict()))
 
-        with patch("builtins.open", mock_open(read_data=json.dumps(state_dict))), patch.object(
-            IncrementalDownloadState, "from_dict", return_value=mock_state
-        ) as mock_from_dict:
-            # Execute
+        # Act
+        with patch("builtins.open", mock_open_obj):
             result = load_progress_from_state_file(
-                test_paths["progress_file"],
+                test_paths["checkpoint_full_path"],
                 mock_logger.echo,
             )
 
-            # Assert
-            mock_from_dict.assert_called_once()
-            assert result == mock_state
+        # Assert
+        mock_open_obj.assert_called_once_with(test_paths["checkpoint_full_path"], "r")
+        assert result.last_lookback_time == mock_state.last_lookback_time
+        assert len(result.jobs) == len(mock_state.jobs)
 
     def test_load_progress_from_state_file_exception(self, mock_logger, test_paths):
         """
-        Test load_progress_from_state_file when an exception occurs.
+        Test load_progress_from_state_file raises exception when file cannot be read.
         """
-        # Setup
-        with patch("builtins.open", side_effect=Exception("File read error")):
-            # Execute and Assert
-            with pytest.raises(Exception) as excinfo:
+        # Arrange
+        mock_open_obj = mock_open()
+        mock_open_obj.side_effect = Exception("Failed to open file")
+
+        # Act & Assert
+        with patch("builtins.open", mock_open_obj):
+            with pytest.raises(Exception):
                 load_progress_from_state_file(
-                    test_paths["progress_file"],
+                    test_paths["checkpoint_full_path"],
                     mock_logger.echo,
                 )
-            assert str(excinfo.value) == "File read error"
 
-    @patch("os.makedirs")
-    @patch("builtins.open", new_callable=mock_open)
-    @patch("json.dump")
-    @patch("os.fsync")
-    @patch("os.replace")
-    def test_save_progress_to_state_file(
-        self,
-        mock_replace,
-        mock_fsync,
-        mock_json_dump,
-        mock_file,
-        mock_makedirs,
-        mock_logger,
-        test_paths,
-        mock_state,
-    ):
+        mock_logger.echo.assert_called_once()
+
+    def test_save_progress_to_state_file(self, mock_logger, mock_state, test_paths):
         """
         Test save_progress_to_state_file successfully saves the state file.
         """
-        # Execute
-        save_progress_to_state_file(
-            test_paths["location"],
-            test_paths["progress_file"],
-            mock_state,
-            mock_logger.echo,
-        )
+        # Arrange
+        mock_open_obj = mock_open()
+        mock_makedirs = MagicMock()
+        mock_fsync = MagicMock()
+        mock_replace = MagicMock()
+        mock_getpid = MagicMock(return_value=12345)
 
-        # Assert
-        mock_makedirs.assert_called_once_with(
-            os.path.dirname(test_paths["location"]), exist_ok=True
-        )
-        mock_file.assert_called_once()
-        mock_json_dump.assert_called_once()
-        mock_fsync.assert_called_once()
-        mock_replace.assert_called_once()
-
-    @patch("os.makedirs", side_effect=Exception("Directory creation error"))
-    def test_save_progress_to_state_file_exception(
-        self, mock_makedirs, mock_logger, test_paths, mock_state
-    ):
-        """
-        Test save_progress_to_state_file when an exception occurs.
-        """
-        # Execute
-        with pytest.raises(Exception) as excinfo:
+        # Act
+        with patch("builtins.open", mock_open_obj), patch("os.makedirs", mock_makedirs), patch(
+            "os.fsync", mock_fsync
+        ), patch("os.replace", mock_replace), patch("os.getpid", mock_getpid):
             save_progress_to_state_file(
-                test_paths["location"],
-                test_paths["progress_file"],
+                test_paths["checkpoint_location"],
+                test_paths["checkpoint_full_path"],
                 mock_state,
                 mock_logger.echo,
             )
 
         # Assert
-        assert str(excinfo.value) == "Directory creation error"
+        mock_makedirs.assert_called_once_with(
+            os.path.dirname(test_paths["checkpoint_location"]), exist_ok=True
+        )
+        mock_open_obj.assert_called_once()
+        mock_fsync.assert_called_once()
+        mock_replace.assert_called_once()
+        mock_logger.echo.assert_called_once()
 
-    def test_incremental_download_state_init(self):
+    def test_save_progress_to_state_file_exception(self, mock_logger, mock_state, test_paths):
         """
-        Test IncrementalDownloadState initialization.
+        Test save_progress_to_state_file raises exception when file cannot be saved.
         """
-        # Test with default values
-        state = IncrementalDownloadState()
-        assert state.last_lookback_time is None
-        assert state.jobs == []
+        # Arrange
+        mock_open_obj = mock_open()
+        mock_open_obj.side_effect = Exception("Failed to open file")
 
-        # Test with provided values
-        last_lookback_time = "2023-01-01T00:00:00Z"
-        jobs = [{"jobId": "job-123", "sessions": []}]
-        state = IncrementalDownloadState(last_lookback_time=last_lookback_time, jobs=jobs)
-        assert state.last_lookback_time == last_lookback_time
-        assert state.jobs == jobs
+        # Act & Assert
+        with patch("builtins.open", mock_open_obj):
+            with pytest.raises(Exception):
+                save_progress_to_state_file(
+                    test_paths["checkpoint_location"],
+                    test_paths["checkpoint_full_path"],
+                    mock_state,
+                    mock_logger.echo,
+                )
 
-    def test_incremental_download_state_from_dict(self):
+        mock_logger.echo.assert_called_once()
+
+    def test_to_dict(self):
         """
-        Test IncrementalDownloadState.from_dict method.
-        """
-        # Test with empty dict
-        state = IncrementalDownloadState.from_dict({})
-        assert state.last_lookback_time is None
-        assert state.jobs == []
-
-        # Test with None
-        state = IncrementalDownloadState.from_dict(None)
-        assert state.last_lookback_time is None
-        assert state.jobs == []
-
-        # Test with valid data
-        data = {
-            "lastLookbackTime": "2023-01-01T00:00:00Z",
-            "jobs": [
-                {
-                    "jobId": "job-123",
-                    "sessions": [
-                        {
-                            "sessionId": "session-123",
-                            "sessionLifecycleStatus": "RUNNING",
-                            "lastDownloadedSessActionId": 5,
-                        }
-                    ],
-                }
-            ],
-        }
-        state = IncrementalDownloadState.from_dict(data)
-        assert state.last_lookback_time == "2023-01-01T00:00:00Z"
-        assert len(state.jobs) == 1
-        assert state.jobs[0]["jobId"] == "job-123"
-
-    def test_incremental_download_state_to_dict(self):
-        """
-        Test IncrementalDownloadState.to_dict method.
+        Test to_dict method of IncrementalDownloadState.
         """
         # Create a state
-        last_lookback_time = "2023-01-01T00:00:00Z"
-        jobs = [
+        last_lookback_time = "2023-01-01T00:00:00"
+        jobs_data: List[Dict[str, Any]] = [
             {
                 "jobId": "job-123",
                 "sessions": [
@@ -246,10 +200,35 @@ class TestIncrementalDownloadState:
                 ],
             }
         ]
-        state = IncrementalDownloadState(last_lookback_time=last_lookback_time, jobs=jobs)
+
+        # Create proper Job objects
+        job_objects = []
+        for job_dict in jobs_data:
+            job = Job(job_id=str(job_dict["jobId"]))
+            sessions = []
+            for session_dict in cast(List[Dict[str, Any]], job_dict["sessions"]):
+                session = JobSession(
+                    session_id=str(session_dict["sessionId"]),
+                    session_lifecycle_status=str(session_dict["sessionLifecycleStatus"]),
+                    last_downloaded_sess_action_id=int(session_dict["lastDownloadedSessActionId"]),
+                )
+                sessions.append(session)
+            job.sessions = sessions
+            job_objects.append(job)
+
+        state = IncrementalDownloadState(last_lookback_time=last_lookback_time, jobs=job_objects)
 
         # Convert to dict
         result = state.to_dict()
 
+        # Expected result
+        expected_jobs = []
+        for job in job_objects:
+            expected_jobs.append(job.to_dict())
+        expected_result = {
+            "lastLookbackTime": last_lookback_time,
+            "jobs": expected_jobs,
+        }
+
         # Assert
-        assert result == {"lastLookbackTime": last_lookback_time, "jobs": jobs}
+        assert result == expected_result

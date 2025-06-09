@@ -4,7 +4,7 @@ from __future__ import annotations
 __all__ = ["_incremental_output_download"]
 
 from .. import api
-from typing import Optional, Callable
+from typing import Optional, Callable, Set
 import boto3
 from deadline.client import _pid_utils
 from deadline.job_attachments.incremental_downloads.incremental_download_state import (
@@ -17,6 +17,9 @@ import datetime
 
 import os
 from deadline.job_attachments.incremental_downloads.exceptions import PidLockAlreadyHeld
+from deadline.job_attachments.incremental_downloads.job_processor import (
+    get_list_of_ongoing_jobs_on_queue,
+)
 
 PID_FILE_NAME = "incremental_output_download.pid"
 DOWNLOAD_PROGRESS_FILE_NAME = "download_progress.json"
@@ -65,25 +68,37 @@ def _incremental_output_download(
         )
         current_download_progress: IncrementalDownloadState = IncrementalDownloadState()
 
-        # 3. If bootstrap is required, then bootstrap using helper function
+        # 3. If bootstrap is required, then bootstrap using bootstrap_lookback_in_minutes
         if force_bootstrap:
             current_download_progress = bootstrap_fresh_state(
                 bootstrap_lookback_in_minutes,
                 print_function_callback,
             )
 
-        # 4. If progress is available, load from the incremental download state file
+        # 4. If download progress is available, load from the incremental download state file
         else:
             current_download_progress = load_progress_from_state_file(
                 saved_progress_checkpoint_full_path, print_function_callback
             )
 
-        # 5. Download outputs for ongoing jobs using current download progress
+        # 5. Get list of ongoing jobs using jobs from current download progress & any updated jobs from deadline
+        ongoing_jobs: Set[str] = get_list_of_ongoing_jobs_on_queue(
+            boto3_session=boto3_session,
+            last_known_set_of_ongoing_jobs=current_download_progress.get_job_ids(),
+            farm_id=farm_id,
+            queue_id=queue_id,
+            last_lookback_time=current_download_progress.get_last_lookback_time(),
+            print_function_callback=print_function_callback,
+        )
+
+        print_function_callback(f"Got the set of ongoing jobs: {ongoing_jobs} on queue {queue_id}")
+
+        # 6. Download outputs for ongoing jobs using current download progress
         # Right now it is set to no change in progress except setting the last lookback time to now
         updated_download_progress: IncrementalDownloadState = current_download_progress
-        updated_download_progress.last_lookback_time = datetime.datetime.utcnow().isoformat() + "Z"
+        updated_download_progress.last_lookback_time = datetime.datetime.utcnow().isoformat()
 
-        # 6. Save progress to incremental download state file
+        # 7. Save progress to incremental download state file
         save_progress_to_state_file(
             saved_progress_checkpoint_location,
             saved_progress_checkpoint_full_path,
@@ -91,8 +106,6 @@ def _incremental_output_download(
             print_function_callback,
         )
 
-    except RuntimeError:
-        _pid_utils.try_acquire_pid_lock(pid_file_full_path, print_function_callback)
     except PidLockAlreadyHeld:
         print_function_callback(
             f"Another download is in progress at {saved_progress_checkpoint_location}, wait for previous download to finish"
