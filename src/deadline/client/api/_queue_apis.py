@@ -4,7 +4,7 @@ from __future__ import annotations
 __all__ = ["_incremental_output_download"]
 
 from .. import api
-from typing import Optional, Callable, Set
+from typing import Optional, Callable, Set, Dict, List
 import boto3
 from deadline.client import _pid_utils
 from deadline.job_attachments.incremental_downloads.incremental_download_state import (
@@ -19,6 +19,9 @@ import os
 from deadline.job_attachments.incremental_downloads.exceptions import PidLockAlreadyHeld
 from deadline.job_attachments.incremental_downloads.job_processor import (
     get_list_of_ongoing_jobs_on_queue,
+)
+from deadline.job_attachments.incremental_downloads.session_action_processor import (
+    SessionActionProcessor,
 )
 
 PID_FILE_NAME = "incremental_output_download.pid"
@@ -93,12 +96,35 @@ def _incremental_output_download(
 
         print_function_callback(f"Got the set of ongoing jobs: {ongoing_jobs} on queue {queue_id}")
 
-        # 6. Download outputs for ongoing jobs using current download progress
+        # 6. Get list of ongoing session action ids from current download progress & updated sessions from deadline
+        # First we create the session_action_processor to persist the session action details in-memory
+        session_action_processor: SessionActionProcessor = SessionActionProcessor(
+            boto3_session=boto3_session,
+            download_progress=current_download_progress,
+            print_function_callback=print_function_callback,
+        )
+        ongoing_session_actions_per_job: Dict[str, List[str]] = (
+            session_action_processor.get_list_of_ongoing_session_action_ids_for_jobs(
+                job_ids=ongoing_jobs,
+                farm_id=farm_id,
+                queue_id=queue_id,
+                last_lookback_time=current_download_progress.get_last_lookback_time(),
+            )
+        )
+
+        total_actions: int = sum(
+            len(actions) for actions in ongoing_session_actions_per_job.values()
+        )
+        print_function_callback(
+            f"Total session actions to download: {total_actions} across {len(ongoing_session_actions_per_job)} jobs"
+        )
+
+        # 7. Download outputs for ongoing jobs using current download progress
         # Right now it is set to no change in progress except setting the last lookback time to now
         updated_download_progress: IncrementalDownloadState = current_download_progress
         updated_download_progress.last_lookback_time = datetime.datetime.utcnow().isoformat()
 
-        # 7. Save progress to incremental download state file
+        # 8. Save progress to incremental download state file
         save_progress_to_state_file(
             saved_progress_checkpoint_location,
             saved_progress_checkpoint_full_path,
