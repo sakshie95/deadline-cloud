@@ -22,7 +22,7 @@ from configparser import ConfigParser
 from typing import Optional
 import boto3
 import os
-from deadline.client.api._queue_apis import DOWNLOAD_PROGRESS_FILE_NAME
+from deadline.job_attachments.incremental_downloads.constants import DOWNLOAD_PROGRESS_FILE_NAME
 
 
 @click.group(name="queue")
@@ -303,6 +303,17 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
         queue_id = config_file.get_setting("defaults.queue_id", config=config)
         boto3_session: boto3.Session = api.get_boto3_session(config=config)
 
+        # Apply conflict resolution setting from Config.
+        conflict_resolution = FileConflictResolution.OVERWRITE
+        conflict_resolution_setting = config_file.get_setting(
+            "settings.conflict_resolution", config=config
+        )
+        if (
+            conflict_resolution_setting
+            and conflict_resolution_setting != FileConflictResolution.NOT_SELECTED.name
+        ):
+            conflict_resolution = FileConflictResolution[conflict_resolution_setting]
+
         # Get download progress file name appended by the queue id - a unique progress file exists per queue
         download_progress_file_name: str = f"{queue_id}_{DOWNLOAD_PROGRESS_FILE_NAME}"
 
@@ -313,12 +324,12 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
 
         # Call the incremental output download api to download outputs
         _queue_apis._incremental_output_download(
-            boto3_session=boto3_session,
             farm_id=farm_id,
             queue_id=queue_id,
+            boto3_session=boto3_session,
             saved_progress_checkpoint_location=saved_progress_checkpoint_location,
+            file_conflict_resolution=conflict_resolution,
             bootstrap_lookback_in_minutes=bootstrap_lookback_in_minutes,
-            # True if either the option is provided by customer or saved progress checkpoint file does not exist
             force_bootstrap=force_bootstrap
             or not os.path.exists(saved_progress_checkpoint_full_path),
             path_mapping_rules=path_mapping_rules,

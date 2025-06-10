@@ -52,13 +52,31 @@ def attachment_download(
     file_name_manifest_dict: Dict[str, BaseAssetManifest] = _read_manifests(
         manifest_paths=manifests
     )
+
+    _attachment_download_with_root_manifests(
+        boto3_session,
+        file_name_manifest_dict,
+        s3_root_uri,
+        conflict_resolution,
+        path_mapping_rules,
+        logger,
+    )
+
+
+def _attachment_download_with_root_manifests(
+    boto3_session: boto3.Session,
+    manifests_by_root: Dict[str, BaseAssetManifest],
+    s3_root_uri: str,
+    conflict_resolution: FileConflictResolution,
+    path_mapping_rules: Optional[str] = None,
+    logger: ClickLogger = ClickLogger(False),
+):
     path_mapping_rule_list: List[PathMappingRule] = _process_path_mapping(
         path_mapping_rules=path_mapping_rules
     )
 
     merged_manifests_by_root: Dict[str, BaseAssetManifest] = dict()
-    for file_name in file_name_manifest_dict:
-        manifest: BaseAssetManifest = file_name_manifest_dict[file_name]
+    for file_name, manifest in manifests_by_root.items():
         # File name is supposed to be prefixed by a hash of source path in path mapping, use that to determine destination
         # If it doesn't appear in path mapping or mapping doesn't exist, download to current directory instead
         destination = next(

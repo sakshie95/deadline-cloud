@@ -22,16 +22,38 @@ from deadline.job_attachments.incremental_downloads.exceptions import PidLockAlr
 @patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
 @patch("deadline.client.api._queue_apis.load_progress_from_state_file")
 @patch("deadline.client.api._queue_apis.save_progress_to_state_file")
+@patch("deadline.client.api._queue_apis.aggregate_manifest_and_download_outputs")
+@patch("deadline.client.api._queue_apis.get_list_of_ongoing_jobs_on_queue")
+@patch(
+    "deadline.job_attachments.incremental_downloads.session_action_processor.SessionActionProcessor"
+)
 @freeze_time("2025-05-26 12:00:00")
 def test_incremental_output_download_success_load_from_progress(
-    mock_save_progress, mock_load_progress, mock_acquire_pid_lock, mock_release_pid_lock, tmp_path
+    mock_session_action_processor_class,
+    mock_get_ongoing_jobs,
+    mock_aggregate_manifest,
+    mock_save_progress,
+    mock_load_progress,
+    mock_acquire_pid_lock,
+    mock_release_pid_lock,
+    tmp_path,
 ):
     """Test successful execution of _incremental_output_download with loading progress from state file"""
     # Arrange
     farm_id = "farm-0123456789abcdef"
     queue_id = "queue-0123456789abcdef"
     boto3_session = MagicMock(spec=boto3.Session)
+    # Mock boto3 client and responses
+    mock_client = MagicMock()
+    boto3_session.client.return_value = mock_client
+    mock_client.get_queue.return_value = {
+        "jobAttachmentSettings": {"bucketName": "test-bucket", "keyPrefix": "test-prefix"},
+        "displayName": "Test Queue",
+    }
+
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
+    os.makedirs(saved_progress_checkpoint_location, exist_ok=True)
+
     pid_file_full_path = os.path.join(
         saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )
@@ -79,6 +101,24 @@ def test_incremental_output_download_success_load_from_progress(
     expected_updated_download_progress = expected_current_download_progress
     expected_updated_download_progress.last_lookback_time = "2025-05-26T12:00:00"
 
+    # Mock the ongoing jobs
+    mock_get_ongoing_jobs.return_value = {"job-1234353453443", "Job-3234324354345"}
+
+    # Mock the session action processor
+    mock_session_action_processor = MagicMock()
+    mock_session_action_processor_class.return_value = mock_session_action_processor
+    mock_session_action_processor.get_list_of_ongoing_session_action_ids_for_jobs.return_value = {
+        "job-1234353453443": ["session-action-1", "session-action-2"],
+        "Job-3234324354345": ["session-action-3"],
+    }
+
+    # Mock the aggregate manifest download
+    mock_aggregate_manifest.return_value = [
+        "session-action-1",
+        "session-action-2",
+        "session-action-3",
+    ]
+
     # Act
     _incremental_output_download(
         farm_id=farm_id,
@@ -106,7 +146,15 @@ def test_incremental_output_download_success_load_from_progress(
 @patch("deadline.client.api._queue_apis._pid_utils.try_acquire_pid_lock")
 @patch("deadline.client.api._queue_apis.bootstrap_fresh_state")
 @patch("deadline.client.api._queue_apis.save_progress_to_state_file")
+@patch("deadline.client.api._queue_apis.aggregate_manifest_and_download_outputs")
+@patch("deadline.client.api._queue_apis.get_list_of_ongoing_jobs_on_queue")
+@patch(
+    "deadline.job_attachments.incremental_downloads.session_action_processor.SessionActionProcessor"
+)
 def test_incremental_output_download_success_with_force_bootstrap(
+    mock_session_action_processor_class,
+    mock_get_ongoing_jobs,
+    mock_aggregate_manifest,
     mock_save_progress,
     mock_bootstrap_fresh_state,
     mock_acquire_pid_lock,
@@ -119,7 +167,17 @@ def test_incremental_output_download_success_with_force_bootstrap(
     farm_id = "farm-0123456789abcdef"
     queue_id = "queue-0123456789abcdef"
     boto3_session = MagicMock(spec=boto3.Session)
+    # Mock boto3 client and responses
+    mock_client = MagicMock()
+    boto3_session.client.return_value = mock_client
+    mock_client.get_queue.return_value = {
+        "jobAttachmentSettings": {"bucketName": "test-bucket", "keyPrefix": "test-prefix"},
+        "displayName": "Test Queue",
+    }
+
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
+    os.makedirs(saved_progress_checkpoint_location, exist_ok=True)
+
     pid_file_full_path = os.path.join(
         saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )
@@ -134,6 +192,24 @@ def test_incremental_output_download_success_with_force_bootstrap(
     mock_bootstrap_fresh_state.return_value = expected_current_download_progress
     expected_updated_download_progress = expected_current_download_progress
     expected_updated_download_progress.last_lookback_time = "2025-05-26T12:00:00"
+
+    # Mock the ongoing jobs
+    mock_get_ongoing_jobs.return_value = {"job-1234353453443", "Job-3234324354345"}
+
+    # Mock the session action processor
+    mock_session_action_processor = MagicMock()
+    mock_session_action_processor_class.return_value = mock_session_action_processor
+    mock_session_action_processor.get_list_of_ongoing_session_action_ids_for_jobs.return_value = {
+        "job-1234353453443": ["session-action-1", "session-action-2"],
+        "Job-3234324354345": ["session-action-3"],
+    }
+
+    # Mock the aggregate manifest download
+    mock_aggregate_manifest.return_value = [
+        "session-action-1",
+        "session-action-2",
+        "session-action-3",
+    ]
 
     # Act
     _incremental_output_download(
@@ -171,7 +247,13 @@ def test_incremental_output_download_pid_lock_already_held_error(
     farm_id = "farm-0123456789abcdef"
     queue_id = "queue-0123456789abcdef"
     boto3_session = MagicMock(spec=boto3.Session)
+    # Mock boto3 client and responses
+    mock_client = MagicMock()
+    boto3_session.client.return_value = mock_client
+
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
+    os.makedirs(saved_progress_checkpoint_location, exist_ok=True)
+
     pid_file_full_path = os.path.join(
         saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )
@@ -203,7 +285,13 @@ def test_incremental_output_download_generic_exception(mock_pid_lock, mock_relea
     farm_id = "farm-0123456789abcdef"
     queue_id = "queue-0123456789abcdef"
     boto3_session = MagicMock(spec=boto3.Session)
+    # Mock boto3 client and responses
+    mock_client = MagicMock()
+    boto3_session.client.return_value = mock_client
+
     saved_progress_checkpoint_location = str(tmp_path / "checkpoint")
+    os.makedirs(saved_progress_checkpoint_location, exist_ok=True)
+
     pid_file_full_path = os.path.join(
         saved_progress_checkpoint_location, "queue-0123456789abcdef_incremental_output_download.pid"
     )

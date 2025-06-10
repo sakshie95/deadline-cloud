@@ -4,7 +4,7 @@ from __future__ import annotations
 __all__ = ["_incremental_output_download"]
 
 from .. import api
-from typing import Optional, Callable, Set, Dict, List
+from typing import Optional, Callable, Set, List
 import boto3
 from deadline.client import _pid_utils
 from deadline.job_attachments.incremental_downloads.incremental_download_state import (
@@ -22,10 +22,16 @@ from deadline.job_attachments.incremental_downloads.job_processor import (
 )
 from deadline.job_attachments.incremental_downloads.session_action_processor import (
     SessionActionProcessor,
+    SessionActionMapping,
 )
-
-PID_FILE_NAME = "incremental_output_download.pid"
-DOWNLOAD_PROGRESS_FILE_NAME = "download_progress.json"
+from deadline.job_attachments.incremental_downloads.manifest_download_handler import (
+    aggregate_manifest_and_download_outputs,
+)
+from deadline.job_attachments.incremental_downloads.constants import (
+    PID_FILE_NAME,
+    DOWNLOAD_PROGRESS_FILE_NAME,
+)
+from deadline.job_attachments.models import FileConflictResolution
 
 
 @api.record_function_latency_telemetry_event()
@@ -34,6 +40,7 @@ def _incremental_output_download(
     queue_id: str,
     boto3_session: boto3.Session,
     saved_progress_checkpoint_location: str,
+    file_conflict_resolution: FileConflictResolution = FileConflictResolution.OVERWRITE,
     bootstrap_lookback_in_minutes: Optional[int] = 0,
     force_bootstrap: bool = False,
     path_mapping_rules: Optional[str] = None,
@@ -44,6 +51,7 @@ def _incremental_output_download(
     The command bootstraps once using a bootstrap lookback specified in minutes and
     continues downloading from the last saved progress thereafter until bootstrap is forced
 
+    :param file_conflict_resolution: Conflict resolution method for files
     :param farm_id: farm id for the output download
     :param queue_id: queue for scoping output download
     :param bootstrap_lookback_in_minutes: Downloads outputs for job-session-actions that have been completed
@@ -103,7 +111,7 @@ def _incremental_output_download(
             download_progress=current_download_progress,
             print_function_callback=print_function_callback,
         )
-        ongoing_session_actions_per_job: Dict[str, List[str]] = (
+        session_action_mappings: List[SessionActionMapping] = (
             session_action_processor.get_list_of_ongoing_session_action_ids_for_jobs(
                 job_ids=ongoing_jobs,
                 farm_id=farm_id,
@@ -112,15 +120,26 @@ def _incremental_output_download(
             )
         )
 
-        total_actions: int = sum(
-            len(actions) for actions in ongoing_session_actions_per_job.values()
-        )
         print_function_callback(
-            f"Total session actions to download: {total_actions} across {len(ongoing_session_actions_per_job)} jobs"
+            f"Total session actions to download: {len(session_action_mappings)}"
         )
 
-        # 7. Download outputs for ongoing jobs using current download progress
-        # Right now it is set to no change in progress except setting the last lookback time to now
+        # 7. Download outputs for ongoing session action ids
+        downloaded_session_action_ids: list[str] = aggregate_manifest_and_download_outputs(
+            boto3_session=boto3_session,
+            session_action_mappings=session_action_mappings,
+            farm_id=farm_id,
+            queue_id=queue_id,
+            file_conflict_resolution=file_conflict_resolution,
+            path_mapping_rules=path_mapping_rules,
+            print_function_callback=print_function_callback,
+        )
+
+        print_function_callback(
+            f"Downloaded outputs for session action ids: {downloaded_session_action_ids}"
+        )
+
+        # Right now updated download progress is set to no change except setting the last lookback time to now
         updated_download_progress: IncrementalDownloadState = current_download_progress
         updated_download_progress.last_lookback_time = datetime.datetime.utcnow().isoformat()
 
