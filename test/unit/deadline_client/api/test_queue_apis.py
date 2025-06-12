@@ -146,6 +146,8 @@ def test_incremental_output_download_success_with_force_bootstrap(
         force_bootstrap=True,
     )
 
+    # Assert
+    mock_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     # Assert the calls were made in expected order
     mock_acquire_pid_lock.assert_called_once_with(pid_file_full_path, logger.echo)
     mock_bootstrap_fresh_state.assert_called_once_with(
