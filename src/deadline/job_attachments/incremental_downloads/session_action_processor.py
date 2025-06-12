@@ -2,16 +2,102 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Set, Any, Callable
+from typing import Dict, List, Set, Any, Callable, Optional
 import boto3
 from datetime import datetime, timezone
+import time
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from deadline.client.api._session import get_default_client_config
 from botocore.exceptions import ClientError
 from deadline.client.exceptions import DeadlineOperationError
 from deadline.job_attachments.incremental_downloads.incremental_download_state import (
     IncrementalDownloadState,
+    JobSession,
 )
+
+
+class RateLimiter:
+    """
+    Simple rate limiter to prevent exceeding API rate limits.
+    """
+
+    def __init__(self, max_calls_per_second=10):
+        self.max_calls_per_second = max_calls_per_second
+        self.calls = []
+        self.lock = threading.Lock()
+
+    def acquire(self):
+        """
+        Acquire permission to make an API call, waiting if necessary.
+        """
+        with self.lock:
+            now = time.time()
+            # Remove calls older than 1 second
+            self.calls = [t for t in self.calls if now - t < 1.0]
+
+            # If we're at the limit, wait until we can make another call
+            if len(self.calls) >= self.max_calls_per_second:
+                oldest_call = self.calls[0]
+                sleep_time = 1.0 - (now - oldest_call)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                    now = time.time()
+                    # Clean up again after sleeping
+                    self.calls = [t for t in self.calls if now - t < 1.0]
+
+            # Add this call to the list
+            self.calls.append(now)
+
+
+class SessionActionMapping:
+    """
+    Model class representing a session action with its associated job, step, and task IDs.
+    """
+
+    def __init__(
+        self,
+        session_action_id: str,
+        job_id: str,
+        step_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ):
+        self.session_action_id = session_action_id
+        self.job_id = job_id
+        self.step_id = step_id
+        self.task_id = task_id
+        self.status = status
+
+    @classmethod
+    def from_api_response(cls, action: Dict[str, Any], job_id: str) -> "SessionActionMapping":
+        """
+        Create a SessionActionMapping from an API response.
+
+        :param action: The session action API response
+        :param job_id: The job ID associated with this session action
+        :return: A SessionActionMapping instance
+        """
+        session_action_id = action.get("sessionActionId", "")
+        status = action.get("status")
+
+        # Extract step_id and task_id from taskRun if available
+        step_id = None
+        task_id = None
+        task_run = action.get("definition", {}).get("taskRun")
+        if task_run:
+            step_id = task_run.get("stepId")
+            task_id = task_run.get("taskId")
+
+        return cls(
+            session_action_id=session_action_id,
+            job_id=job_id,
+            step_id=step_id,
+            task_id=task_id,
+            status=status,
+        )
 
 
 class SessionActionProcessor:
@@ -53,7 +139,10 @@ class SessionActionProcessor:
         ] = {}  # Maps session ID to last downloaded action ID
         self.session_to_last_finished_action_id: Dict[
             str, str
-        ] = {}  # Maps session ID to last finished action ID (any terminal status)
+        ] = {}  # Maps session ID to last finished action ID
+
+        # Add a cache for parsed action IDs to avoid repeated parsing
+        self._action_id_number_cache: Dict[str, int] = {}
 
         # Extract existing session action data from download progress if available
         for job in self.download_progress.jobs:
@@ -68,147 +157,253 @@ class SessionActionProcessor:
                     action_id = f"{session.session_id}-{session.last_downloaded_sess_action_id}"
                     self.session_to_last_downloaded_action_id[session.session_id] = action_id
 
-    def get_session_to_job_map(self) -> Dict[str, str]:
-        """
-        Get the current session to job mapping.
-
-        :return: Dictionary mapping session IDs to job IDs
-        """
-        return self.session_to_job_map
-
-    def get_session_to_lifecycle_status_map(self) -> Dict[str, str]:
-        """
-        Get the current session to lifecycle status mapping.
-
-        :return: Dictionary mapping session IDs to lifecycle statuses
-        """
-        return self.session_to_lifecycle_status_map
-
-    def get_auxiliary_session_action_status_mapping(self) -> Dict[str, str]:
-        """
-        Get the current session action to status mapping.
-
-        :return: Dictionary mapping session action IDs to their statuses
-        """
-        return self.auxiliary_session_action_status_mapping
-
-    def get_session_to_last_downloaded_action_id(self) -> Dict[str, str]:
-        """
-        Get the current session to last downloaded action ID mapping.
-
-        :return: Dictionary mapping session IDs to their last downloaded action IDs
-        """
-        return self.session_to_last_downloaded_action_id
-
-    def get_session_to_last_finished_action_id(self) -> Dict[str, str]:
-        """
-        Get the current session to last finished action ID mapping.
-
-        :return: Dictionary mapping session IDs to their last finished action IDs (any terminal status)
-        """
-        return self.session_to_last_finished_action_id
-
     def get_list_of_ongoing_session_action_ids_for_jobs(
         self, job_ids: Set[str], farm_id: str, queue_id: str, last_lookback_time: str
-    ) -> Dict[str, List[str]]:
+    ) -> List[SessionActionMapping]:
         """
-        Get map of job IDs to session action IDs that have been updated since the last lookback time
+        Get list of session action mappings that have been updated since the last lookback time
         and haven't been downloaded yet.
+
+        Optimized to process data in a single pass and use parallel API calls.
 
         :param job_ids: Set of job IDs to check for sessions
         :param farm_id: Farm ID
         :param queue_id: Queue ID
         :param last_lookback_time: Last lookback time in ISO format
-        :return: Dictionary mapping job IDs to lists of session action IDs that need to be downloaded
+        :return: List of SessionActionMapping objects that need to be downloaded
         """
         self.print_function_callback(
-            f"Getting ongoing session actions for {len(job_ids)} jobs since {last_lookback_time}"
+            f"Getting ongoing sessions for {len(job_ids)} jobs since {last_lookback_time}"
         )
+
+        # Start timing
+        start_time = time.time()
 
         # Step 1: Get all sessions updated since last lookback time
-        updated_sessions: List[str] = self._get_updated_sessions_since_lookback_from_deadline(
+        updated_sessions = self._get_sessions_started_since_lookback_from_deadline(
             job_ids, farm_id, queue_id, last_lookback_time
         )
-        self.print_function_callback(f"Found {len(updated_sessions)} updated sessions from API")
+        self.print_function_callback(
+            f"Found {len(updated_sessions)} newly created sessions from API"
+        )
 
         # Step 2: Add sessions from download progress that are associated with the job IDs
-        existing_sessions: List[str] = self._get_sessions_from_download_progress(job_ids)
-        all_sessions: List[str] = list(set(updated_sessions + existing_sessions))
+        existing_sessions = self._get_sessions_from_download_progress(job_ids)
+
+        # Use set operations for faster union and deduplication
+        all_sessions = set(updated_sessions) | set(existing_sessions)
         self.print_function_callback(
             f"Total sessions to process (API + download progress): {len(all_sessions)}"
         )
 
-        # Step 3: Get session actions for each session and filter for those that need downloading
-        job_to_session_actions: Dict[str, List[str]] = {}
+        # Step 3: Get session actions for each session in parallel and filter for those that need downloading
+        session_action_mappings = []
+        seen_action_ids = set()  # For fast duplicate checking
 
-        for session_id in all_sessions:
+        self.print_function_callback(
+            "Fetching session actions for all ongoing sessions in parallel..."
+        )
+
+        # Function to process a single session and its actions
+        def process_session(session_id):
+            result_mappings: List[SessionActionMapping] = []
+            highest_finished_action: Dict[str, Any] = {"num": -1, "id": None}
+
             # Get the job ID for this session
             job_id = self.session_to_job_map.get(session_id)
             if not job_id:
                 self.print_function_callback(f"No job ID found for session {session_id}, skipping")
-                continue
+                return result_mappings, highest_finished_action
 
             # Get the last downloaded action ID for this session
             last_downloaded_action_id = self._get_last_downloaded_action_id(session_id)
 
-            # Get all actions for this session
+            # Get all actions for this session - this is the I/O operation
             session_actions = self._get_session_actions_from_deadline(
                 session_id, farm_id, queue_id, job_id
             )
 
-            # Update tracking for all terminal status actions
-            terminal_statuses = ["SUCCEEDED", "FAILED", "INTERRUPTED", "CANCELED"]
+            # Process all actions in a single pass
+            local_seen_action_ids = set()  # Track locally to avoid thread conflicts
+
             for action in session_actions:
                 action_id = action["sessionActionId"]
                 status = action.get("status", "")
 
-                # Track the status in our auxiliary mapping
-                if status:
-                    self.auxiliary_session_action_status_mapping[action_id] = status
-
-                # For terminal statuses, update the last finished action ID if it's newer
-                if status in terminal_statuses:
-                    action_num = self._get_action_id_number_from_session_action_id(action_id)
-                    last_finished_action_id = self._get_action_id_number_from_session_action_id(
-                        self.session_to_last_finished_action_id.get(session_id, "")
-                    )
-                    if action_num > last_finished_action_id:
-                        self.session_to_last_finished_action_id[session_id] = action_id
-
-            # Filter for SUCCEEDED actions that haven't been downloaded yet and are taskRun session actions
-            new_actions = [
-                action
-                for action in session_actions
+                # Process only SUCCEEDED task run actions
                 if (
-                    self._get_action_id_number_from_session_action_id(action["sessionActionId"])
-                    > last_downloaded_action_id
-                    and action.get("status") == "SUCCEEDED"
+                    status == "SUCCEEDED"
                     and action.get("definition", {}).get("taskRun") is not None
+                ):
+                    # Get action number once
+                    action_num = self._get_action_id_number_from_session_action_id(action_id)
+
+                    # Track highest finished action in the same pass
+                    if action_num > highest_finished_action["num"]:  # type: ignore
+                        highest_finished_action["num"] = action_num
+                        highest_finished_action["id"] = action_id
+
+                    # Check if this action needs to be downloaded
+                    if action_num > last_downloaded_action_id:
+                        # Convert to SessionActionMapping and add to the list if not a duplicate
+                        if action_id not in local_seen_action_ids:
+                            mapping = SessionActionMapping.from_api_response(action, job_id)
+                            result_mappings.append(mapping)
+                            local_seen_action_ids.add(action_id)
+
+            return result_mappings, highest_finished_action
+
+        # Process sessions in parallel with a thread pool
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            # Submit all sessions to the executor
+            future_to_session = {
+                executor.submit(process_session, session_id): session_id
+                for session_id in all_sessions
+            }
+
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_session):
+                session_id = future_to_session[future]
+                try:
+                    mappings, highest_finished_action = future.result()
+
+                    # Update the last finished action ID for this session
+                    if highest_finished_action["id"]:
+                        self.session_to_last_finished_action_id[session_id] = (
+                            highest_finished_action["id"]
+                        )
+
+                    # Add mappings that aren't already in the global list
+                    for mapping in mappings:
+                        if mapping.session_action_id not in seen_action_ids:
+                            session_action_mappings.append(mapping)
+                            seen_action_ids.add(mapping.session_action_id)
+
+                except Exception as e:
+                    self.print_function_callback(f"Error processing session {session_id}: {str(e)}")
+
+        # End timing and print the elapsed time
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        self.print_function_callback(
+            f"Time taken to fetch all session actions: {elapsed_time:.2f} seconds"
+        )
+
+        return session_action_mappings
+
+    def get_updated_list_of_ongoing_sessions_pending_download(
+        self, downloaded_session_action_ids: List[str]
+    ) -> List[JobSession]:
+        """
+        Get an updated list of ongoing sessions that are pending download using the in-memory maps
+        and successfully downloaded session action ids.
+
+        Optimized with thread-safe operations.
+
+        Args:
+            downloaded_session_action_ids: List of session action IDs that have been downloaded
+                                          (source of truth for what has been downloaded)
+
+        Returns:
+            List of JobSession objects for sessions that need further processing
+        """
+        # Process downloaded action IDs more efficiently
+        session_to_max_action_num: Dict[str, int] = {}
+
+        # Process all downloaded action IDs in a single pass
+        for action_id in downloaded_session_action_ids:
+            # Extract session ID and action number from the action ID
+            parts = action_id.split("-")
+            if len(parts) >= 3:
+                action_num = int(parts[-1])
+                session_id_parts = parts[:-1]
+
+                if session_id_parts[0] == "sessionaction":
+                    session_id_parts[0] = "session"
+
+                session_id = "-".join(session_id_parts)
+
+                # Update max action number for this session
+                current_max = session_to_max_action_num.get(session_id, -1)
+                if action_num > current_max:
+                    session_to_max_action_num[session_id] = action_num
+                    self.session_to_last_downloaded_action_id[session_id] = action_id
+
+        # Create session mappings in a single pass
+        session_mappings = []
+
+        # Function to process a single session
+        def process_session(session_item):
+            session_id, job_id = session_item
+
+            # Get session status
+            session_status = self.session_to_lifecycle_status_map.get(session_id) or ""
+
+            # Get last downloaded and finished action numbers
+            last_downloaded_action_id_str = (
+                self.session_to_last_downloaded_action_id.get(session_id) or ""
+            )
+            last_downloaded_action_num = self._get_action_id_number_from_session_action_id(
+                last_downloaded_action_id_str
+            )
+
+            last_finished_action_id = self.session_to_last_finished_action_id.get(session_id) or ""
+            last_finished_action_num = self._get_action_id_number_from_session_action_id(
+                last_finished_action_id
+            )
+
+            # Simplified logic for determining if session needs further processing
+            include_session = session_status != "ENDED" or (
+                session_status == "ENDED"
+                and last_finished_action_id
+                and last_finished_action_id != ""
+                and (
+                    last_finished_action_num < 0
+                    or last_downloaded_action_num < last_finished_action_num
                 )
-            ]
+            )
 
-            if new_actions:
-                # Add the session action IDs to our result map
-                action_ids = [action["sessionActionId"] for action in new_actions]
-                if job_id in job_to_session_actions:
-                    # Use a set to ensure uniqueness before extending the list
-                    existing_ids = set(job_to_session_actions[job_id])
-                    unique_new_ids = [id for id in action_ids if id not in existing_ids]
-                    job_to_session_actions[job_id].extend(unique_new_ids)
-                else:
-                    job_to_session_actions[job_id] = action_ids
-            else:
-                self.print_function_callback(
-                    f"No new SUCCEEDED actions for session {session_id} (Job: {job_id})"
+            if include_session:
+                if session_status != "ENDED":
+                    self.print_function_callback(
+                        f"Including session {session_id} in ongoing progress because it's not ENDED (status: {session_status})"
+                    )
+
+                return JobSession(
+                    session_id=session_id,
+                    session_lifecycle_status=session_status,
+                    last_downloaded_sess_action_id=last_downloaded_action_num,
+                    job_id=job_id,
                 )
 
-        return job_to_session_actions
+            return None
 
-    def _get_updated_sessions_since_lookback_from_deadline(
+        # Process sessions in parallel with a thread pool
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            # Submit all sessions to the executor
+            future_to_session = {
+                executor.submit(process_session, item): item[0]
+                for item in self.session_to_job_map.items()
+            }
+
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_session):
+                try:
+                    result = future.result()
+                    if result:
+                        session_mappings.append(result)
+                except Exception as e:
+                    session_id = future_to_session[future]
+                    self.print_function_callback(f"Error processing session {session_id}: {str(e)}")
+
+        return session_mappings
+
+    def _get_sessions_started_since_lookback_from_deadline(
         self, job_ids: Set[str], farm_id: str, queue_id: str, last_lookback_time: str
     ) -> List[str]:
         """
-        Get sessions that have been updated since the last lookback time.
+        Get newer sessions that have been started since the last lookback time.
+        Uses parallel API calls with rate limiting and throttling exception handling.
 
         :param job_ids: Set of job IDs to check for sessions
         :param farm_id: Farm ID
@@ -216,75 +411,154 @@ class SessionActionProcessor:
         :param last_lookback_time: Last lookback time in ISO format
         :return: List of session IDs that have been updated
         """
-        updated_sessions: List[str] = []
-        deadline_client = self.boto3_session.client("deadline", config=get_default_client_config())
+        newer_sessions = []
 
         try:
             # Convert last_lookback_time to datetime for comparison
             lookback_datetime = datetime.fromisoformat(last_lookback_time)
-            # Ensure lookback_datetime is timezone-aware (UTC)
             if lookback_datetime.tzinfo is None:
                 lookback_datetime = lookback_datetime.replace(tzinfo=timezone.utc)
 
-            # For each job, list its sessions
-            for job_id in job_ids:
+            # Function to get sessions for a single job with retry logic
+            def get_sessions_for_job(job_id):
+                job_sessions = []
+                deadline_client = self.boto3_session.client(
+                    "deadline", config=get_default_client_config()
+                )
+
                 try:
-                    # Initial request
-                    response = deadline_client.list_sessions(
-                        farmId=farm_id, jobId=job_id, queueId=queue_id
-                    )
+                    # Make initial API call with retry for throttling
+                    max_retries = 3
+                    retry_count = 0
+                    backoff_time = 0.5  # Start with 500ms backoff
 
-                    # Process the first page of results
-                    self._process_sessions_response(
-                        response, job_id, lookback_datetime, updated_sessions
-                    )
+                    while retry_count <= max_retries:
+                        try:
+                            response = deadline_client.list_sessions(
+                                farmId=farm_id, jobId=job_id, queueId=queue_id, maxResults=100
+                            )
 
-                    # Continue paginating if there are more results
-                    while "nextToken" in response:
-                        response = deadline_client.list_sessions(
-                            farmId=farm_id,
-                            jobId=job_id,
-                            queueId=queue_id,
-                            nextToken=response["nextToken"],
-                        )
-                        self._process_sessions_response(
-                            response, job_id, lookback_datetime, updated_sessions
-                        )
+                            # Process the response
+                            for session in response.get("sessions", []):
+                                session_id = session.get("sessionId")
 
-                except ClientError as e:
+                                # Update tracking maps
+                                self.session_to_job_map[session_id] = job_id
+                                self.session_to_lifecycle_status_map[session_id] = session[
+                                    "lifecycleStatus"
+                                ]
+
+                                # Check if session was started after lookback time
+                                started_at = session.get("startedAt")
+                                if started_at and started_at >= lookback_datetime:
+                                    job_sessions.append(session_id)
+
+                            # Handle pagination
+                            while "nextToken" in response and response["nextToken"]:
+                                try:
+                                    response = deadline_client.list_sessions(
+                                        farmId=farm_id,
+                                        jobId=job_id,
+                                        queueId=queue_id,
+                                        nextToken=response["nextToken"],
+                                        maxResults=100,
+                                    )
+
+                                    # Process the response
+                                    for session in response.get("sessions", []):
+                                        session_id = session.get("sessionId")
+
+                                        # Update tracking maps
+                                        self.session_to_job_map[session_id] = job_id
+                                        self.session_to_lifecycle_status_map[session_id] = session[
+                                            "lifecycleStatus"
+                                        ]
+
+                                        # Check if session was started after lookback time
+                                        started_at = session.get("startedAt")
+                                        if started_at and started_at >= lookback_datetime:
+                                            job_sessions.append(session_id)
+
+                                except ClientError as e:
+                                    if (
+                                        e.response.get("Error", {}).get("Code")
+                                        == "ThrottlingException"
+                                    ):
+                                        time.sleep(backoff_time)
+                                        backoff_time *= 2  # Exponential backoff
+                                        continue
+                                    else:
+                                        raise
+
+                            # If we got here, we successfully processed all pages
+                            break
+
+                        except ClientError as e:
+                            if e.response.get("Error", {}).get("Code") == "ThrottlingException":
+                                retry_count += 1
+                                if retry_count <= max_retries:
+                                    time.sleep(backoff_time)
+                                    backoff_time *= 2  # Exponential backoff
+                                else:
+                                    self.print_function_callback(
+                                        f"Max retries exceeded for job {job_id} due to throttling"
+                                    )
+                                    break
+                            else:
+                                self.print_function_callback(
+                                    f"Error listing sessions for job {job_id}: {str(e)}"
+                                )
+                                break
+
+                except Exception as e:
                     self.print_function_callback(
-                        f"Error listing sessions for job {job_id}: {str(e)}"
+                        f"Unexpected error listing sessions for job {job_id}: {str(e)}"
                     )
-                    continue
 
-        except ClientError as e:
+                return job_sessions
+
+            # Process jobs in parallel with a thread pool
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                # Submit all jobs to the executor
+                future_to_job = {
+                    executor.submit(get_sessions_for_job, job_id): job_id for job_id in job_ids
+                }
+
+                # Process results as they complete
+                for future in concurrent.futures.as_completed(future_to_job):
+                    job_id = future_to_job[future]
+                    try:
+                        job_sessions = future.result()
+                        newer_sessions.extend(job_sessions)
+                    except Exception as e:
+                        self.print_function_callback(f"Error processing job {job_id}: {str(e)}")
+
+        except Exception as e:
             raise DeadlineOperationError(f"Failed to get sessions from Deadline: {str(e)}") from e
 
-        return updated_sessions
+        return newer_sessions
 
-    def _process_sessions_response(self, response, job_id, lookback_datetime, updated_sessions):
+    def _process_sessions_response(self, response, job_id, lookback_datetime, newer_sessions):
         """
-        Process a page of sessions response and update the updated_sessions list.
+        Process a page of sessions response and update the newer_sessions list.
+        Optimized to reduce redundant operations.
 
         :param response: API response from list_sessions
         :param job_id: Current job ID
         :param lookback_datetime: Datetime to compare against
-        :param updated_sessions: List to append updated session IDs to
+        :param newer_sessions: List to append newer session IDs to
         """
         for session in response.get("sessions", []):
             session_id = session.get("sessionId")
 
-            # TODO: Switch to using updatedAt once Deadline Cloud List API returns it consistently for all sessions
-            # For now, we're using startedAt as a fallback since not all sessions have updatedAt in the response
-            started_at = session.get("startedAt")
+            # Update tracking maps in a single operation
+            self.session_to_job_map[session_id] = job_id
+            self.session_to_lifecycle_status_map[session_id] = session["lifecycleStatus"]
 
             # Check if the session was started after the lookback time
+            started_at = session.get("startedAt")
             if started_at and started_at >= lookback_datetime:
-                updated_sessions.append(session_id)
-
-                # Update our tracking maps
-                self.session_to_job_map[session_id] = job_id
-                self.session_to_lifecycle_status_map[session_id] = session["lifecycleStatus"]
+                newer_sessions.append(session_id)
 
     def _get_sessions_from_download_progress(self, job_ids: Set[str]) -> List[str]:
         """
@@ -306,10 +580,10 @@ class SessionActionProcessor:
         self, session_id: str, farm_id: str, queue_id: str, job_id: str
     ) -> List[Dict[str, Any]]:
         """
-        Get all actions for a session.
+        Get all session actions for a session with throttling exception handling.
 
-        :param job_id:
-        :param queue_id: QueueID
+        :param job_id: Job ID
+        :param queue_id: Queue ID
         :param session_id: Session ID
         :param farm_id: Farm ID
         :return: List of session actions
@@ -317,42 +591,75 @@ class SessionActionProcessor:
         deadline_client = self.boto3_session.client("deadline", config=get_default_client_config())
         session_actions = []
 
+        # Retry logic for throttling
+        max_retries = 3
+        retry_count = 0
+        backoff_time = 0.5  # Start with 500ms backoff
+
         try:
-            # Initial request
-            response = deadline_client.list_session_actions(
-                farmId=farm_id,
-                queueId=queue_id,
-                jobId=job_id,
-                sessionId=session_id,
-            )
+            while retry_count <= max_retries:
+                try:
+                    # Acquire permission from rate limiter
+                    # self.rate_limiter.acquire()
 
-            # Process the first page of results
-            session_actions = response.get("sessionActions", [])
-
-            # Continue paginating if there are more results
-            while "nextToken" in response:
-                response = deadline_client.list_session_actions(
-                    farmId=farm_id,
-                    queueId=queue_id,
-                    jobId=job_id,
-                    sessionId=session_id,
-                    nextToken=response["nextToken"],
-                )
-                self.print_function_callback(
-                    f"List session actions next page response for session {session_id}: {response}"
-                )
-                session_actions.extend(response.get("sessionActions", []))
-
-            # Update the auxiliary_session_action_status_mapping with status of each action
-            for action in session_actions:
-                if "sessionActionId" in action and "status" in action:
-                    self.auxiliary_session_action_status_mapping[action["sessionActionId"]] = (
-                        action["status"]
+                    # Request maximum results per page
+                    response = deadline_client.list_session_actions(
+                        farmId=farm_id,
+                        queueId=queue_id,
+                        jobId=job_id,
+                        sessionId=session_id,
+                        maxResults=100,  # Maximum allowed by API
                     )
 
-        except ClientError as e:
+                    # Process the first page of results
+                    session_actions.extend(response.get("sessionActions", []))
+
+                    # Continue paginating if there are more results
+                    while "nextToken" in response and response["nextToken"]:
+                        # Acquire permission for the next API call
+                        # self.rate_limiter.acquire()
+
+                        try:
+                            response = deadline_client.list_session_actions(
+                                farmId=farm_id,
+                                queueId=queue_id,
+                                jobId=job_id,
+                                sessionId=session_id,
+                                nextToken=response["nextToken"],
+                                maxResults=100,  # Maximum allowed by API
+                            )
+                            session_actions.extend(response.get("sessionActions", []))
+                        except ClientError as e:
+                            if e.response.get("Error", {}).get("Code") == "ThrottlingException":
+                                time.sleep(backoff_time)
+                                backoff_time *= 2  # Exponential backoff
+                                continue
+                            else:
+                                raise
+
+                    # If we got here, we successfully processed all pages
+                    break
+
+                except ClientError as e:
+                    if e.response.get("Error", {}).get("Code") == "ThrottlingException":
+                        retry_count += 1
+                        if retry_count <= max_retries:
+                            time.sleep(backoff_time)
+                            backoff_time *= 2  # Exponential backoff
+                        else:
+                            self.print_function_callback(
+                                f"Max retries exceeded for session {session_id} due to throttling"
+                            )
+                            break
+                    else:
+                        self.print_function_callback(
+                            f"Error listing actions for session {session_id}: {str(e)}"
+                        )
+                        break
+
+        except Exception as e:
             self.print_function_callback(
-                f"Error listing actions for session {session_id}: {str(e)}"
+                f"Unexpected error listing actions for session {session_id}: {str(e)}"
             )
 
         return session_actions
@@ -375,16 +682,30 @@ class SessionActionProcessor:
 
     def _get_action_id_number_from_session_action_id(self, action_id: str) -> int:
         """
-        Extract the numeric part from a session action ID.
+        Extract the numeric part from a session action ID with caching.
 
-        :param action_id: Session action ID (e.g., "Session-12345-1")
+        :param action_id: Session action ID (e.g., "sessionaction-12345-1")
         :return: Numeric part of the action ID, or -1 if invalid format
         """
+        # Return from cache if available
+        if action_id in self._action_id_number_cache:
+            return self._action_id_number_cache[action_id]
+
+        # Default value for invalid/empty IDs
+        if not action_id or action_id == "":
+            self._action_id_number_cache[action_id] = -1
+            return -1
+
         try:
             # Extract the last part of the ID which should be the numeric index
             parts = action_id.split("-")
             if len(parts) >= 3:
-                return int(parts[-1])
-            return -1
+                result = int(parts[-1])
+            else:
+                result = -1
         except (ValueError, IndexError):
-            return -1
+            result = -1
+
+        # Cache the result
+        self._action_id_number_cache[action_id] = result
+        return result

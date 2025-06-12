@@ -7,6 +7,7 @@ from typing import List
 
 from deadline.job_attachments.incremental_downloads.session_action_processor import (
     SessionActionProcessor,
+    SessionActionMapping,
 )
 from deadline.job_attachments.incremental_downloads.incremental_download_state import (
     IncrementalDownloadState,
@@ -113,108 +114,6 @@ class TestSessionActionProcessor:
 
         # Verify the auxiliary_session_action_status_mapping is initialized as empty
         assert processor.auxiliary_session_action_status_mapping == {}
-
-    def test_get_session_to_job_map(
-        self, mock_boto3_session, mock_print_function, sample_download_progress
-    ):
-        """
-        Test get_session_to_job_map method.
-        """
-        processor = SessionActionProcessor(
-            boto3_session=mock_boto3_session,
-            download_progress=sample_download_progress,
-            print_function_callback=mock_print_function,
-        )
-
-        result = processor.get_session_to_job_map()
-
-        assert result == {
-            "session-123": "job-123",
-            "session-456": "job-123",
-            "session-789": "job-456",
-        }
-
-    def test_get_session_to_lifecycle_status_map(
-        self, mock_boto3_session, mock_print_function, sample_download_progress
-    ):
-        """
-        Test get_session_to_lifecycle_status_map method.
-        """
-        processor = SessionActionProcessor(
-            boto3_session=mock_boto3_session,
-            download_progress=sample_download_progress,
-            print_function_callback=mock_print_function,
-        )
-
-        result = processor.get_session_to_lifecycle_status_map()
-
-        assert result == {
-            "session-123": "SUCCEEDED",
-            "session-456": "RUNNING",
-            "session-789": "FAILED",
-        }
-
-    def test_get_auxiliary_session_action_status_mapping(
-        self, mock_boto3_session, mock_print_function, sample_download_progress
-    ):
-        """
-        Test get_auxiliary_session_action_status_mapping method.
-        """
-        processor = SessionActionProcessor(
-            boto3_session=mock_boto3_session,
-            download_progress=sample_download_progress,
-            print_function_callback=mock_print_function,
-        )
-
-        processor.auxiliary_session_action_status_mapping = {
-            "session-123-1": "SUCCEEDED",
-            "session-456-1": "RUNNING",
-        }
-
-        result = processor.get_auxiliary_session_action_status_mapping()
-
-        assert result == {"session-123-1": "SUCCEEDED", "session-456-1": "RUNNING"}
-
-    def test_get_session_to_last_downloaded_action_id(
-        self, mock_boto3_session, mock_print_function, sample_download_progress
-    ):
-        """
-        Test get_session_to_last_downloaded_action_id method.
-        """
-        processor = SessionActionProcessor(
-            boto3_session=mock_boto3_session,
-            download_progress=sample_download_progress,
-            print_function_callback=mock_print_function,
-        )
-
-        result = processor.get_session_to_last_downloaded_action_id()
-
-        assert result == {
-            "session-123": "session-123-2",
-            "session-456": "session-456-1",
-            "session-789": "session-789-3",
-        }
-
-    def test_get_session_to_last_finished_action_id(
-        self, mock_boto3_session, mock_print_function, sample_download_progress
-    ):
-        """
-        Test get_session_to_last_finished_action_id method.
-        """
-        processor = SessionActionProcessor(
-            boto3_session=mock_boto3_session,
-            download_progress=sample_download_progress,
-            print_function_callback=mock_print_function,
-        )
-
-        processor.session_to_last_finished_action_id = {
-            "session-123": "session-123-3",
-            "session-456": "session-456-2",
-        }
-
-        result = processor.get_session_to_last_finished_action_id()
-
-        assert result == {"session-123": "session-123-3", "session-456": "session-456-2"}
 
     def test_get_action_id_number_from_session_action_id(
         self, mock_boto3_session, mock_print_function, sample_download_progress
@@ -340,11 +239,11 @@ class TestSessionActionProcessor:
     @patch(
         "deadline.job_attachments.incremental_downloads.session_action_processor.get_default_client_config"
     )
-    def test_get_updated_sessions_since_lookback_from_deadline(
+    def test_get_sessions_started_since_lookback_from_deadline(
         self, mock_get_config, mock_boto3_session, mock_print_function, sample_download_progress
     ):
         """
-        Test _get_updated_sessions_since_lookback_from_deadline method.
+        Test _get_sessions_started_since_lookback_from_deadline method.
         """
         processor = SessionActionProcessor(
             boto3_session=mock_boto3_session,
@@ -395,14 +294,14 @@ class TestSessionActionProcessor:
         queue_id = "queue-123"
         last_lookback_time = "2025-06-09T08:00:00+00:00"
 
-        result = processor._get_updated_sessions_since_lookback_from_deadline(
+        result = processor._get_sessions_started_since_lookback_from_deadline(
             job_ids, farm_id, queue_id, last_lookback_time
         )
 
         # Verify that only sessions started after lookback time are returned
         assert set(result) == {"session-new-1", "session-new-2"}
 
-        # Verify that list_sessions is called with correct parameters
+        # Verify that list_sessions is called with correct parameters for the first job
         mock_client.list_sessions.assert_any_call(farmId=farm_id, jobId="job-123", queueId=queue_id)
         mock_client.list_sessions.assert_any_call(
             farmId=farm_id, jobId="job-123", queueId=queue_id, nextToken="token1"
@@ -412,11 +311,11 @@ class TestSessionActionProcessor:
     @patch(
         "deadline.job_attachments.incremental_downloads.session_action_processor.get_default_client_config"
     )
-    def test_get_updated_sessions_since_lookback_from_deadline_client_error(
+    def test_get_sessions_started_since_lookback_from_deadline_client_error(
         self, mock_get_config, mock_boto3_session, mock_print_function, sample_download_progress
     ):
         """
-        Test _get_updated_sessions_since_lookback_from_deadline method with ClientError.
+        Test _get_sessions_started_since_lookback_from_deadline method with ClientError.
         """
         processor = SessionActionProcessor(
             boto3_session=mock_boto3_session,
@@ -447,7 +346,7 @@ class TestSessionActionProcessor:
         queue_id = "queue-123"
         last_lookback_time = "2025-06-09T08:00:00+00:00"
 
-        result = processor._get_updated_sessions_since_lookback_from_deadline(
+        result = processor._get_sessions_started_since_lookback_from_deadline(
             job_ids, farm_id, queue_id, last_lookback_time
         )
 
@@ -551,7 +450,7 @@ class TestSessionActionProcessor:
         # Verify that an empty list is returned
         assert result == []
 
-    @patch.object(SessionActionProcessor, "_get_updated_sessions_since_lookback_from_deadline")
+    @patch.object(SessionActionProcessor, "_get_sessions_started_since_lookback_from_deadline")
     @patch.object(SessionActionProcessor, "_get_sessions_from_download_progress")
     @patch.object(SessionActionProcessor, "_get_last_downloaded_action_id")
     @patch.object(SessionActionProcessor, "_get_session_actions_from_deadline")
@@ -614,8 +513,23 @@ class TestSessionActionProcessor:
             job_ids, farm_id, queue_id, last_lookback_time
         )
 
-        # Verify that only SUCCEEDED actions with taskRun are returned
-        assert result == {"job-123": ["session-123-3", "session-123-5"]}
+        # Verify that only SUCCEEDED actions with taskRun are returned as SessionActionMapping objects
+        assert len(result) == 2
+        assert all(isinstance(item, SessionActionMapping) for item in result)
+
+        # Check the first mapping
+        assert result[0].session_action_id == "session-123-3"
+        assert result[0].job_id == "job-123"
+        assert result[0].step_id == "step-123"
+        assert result[0].task_id == "task-123"
+        assert result[0].status == "SUCCEEDED"
+
+        # Check the second mapping
+        assert result[1].session_action_id == "session-123-5"
+        assert result[1].job_id == "job-123"
+        assert result[1].step_id == "step-789"
+        assert result[1].task_id == "task-789"
+        assert result[1].status == "SUCCEEDED"
 
         # Verify that methods are called with correct parameters
         mock_get_updated_sessions.assert_called_once_with(
@@ -628,7 +542,7 @@ class TestSessionActionProcessor:
 
         assert processor.session_to_last_finished_action_id["session-123"] == "session-123-5"
 
-    @patch.object(SessionActionProcessor, "_get_updated_sessions_since_lookback_from_deadline")
+    @patch.object(SessionActionProcessor, "_get_sessions_started_since_lookback_from_deadline")
     @patch.object(SessionActionProcessor, "_get_sessions_from_download_progress")
     def test_get_list_of_ongoing_session_action_ids_for_jobs_no_job_id(
         self,
@@ -665,9 +579,10 @@ class TestSessionActionProcessor:
         )
 
         # Verify the result
-        assert isinstance(result, dict)
+        assert isinstance(result, list)
+        assert len(result) == 0
 
-    @patch.object(SessionActionProcessor, "_get_updated_sessions_since_lookback_from_deadline")
+    @patch.object(SessionActionProcessor, "_get_sessions_started_since_lookback_from_deadline")
     @patch.object(SessionActionProcessor, "_get_sessions_from_download_progress")
     def test_get_list_of_ongoing_session_action_ids_for_jobs_job_id_not_in_target(
         self,
@@ -704,9 +619,10 @@ class TestSessionActionProcessor:
         )
 
         # Verify that no session actions are returned
-        assert result == {}
+        assert isinstance(result, list)
+        assert len(result) == 0
 
-    @patch.object(SessionActionProcessor, "_get_updated_sessions_since_lookback_from_deadline")
+    @patch.object(SessionActionProcessor, "_get_sessions_started_since_lookback_from_deadline")
     @patch.object(SessionActionProcessor, "_get_sessions_from_download_progress")
     @patch.object(SessionActionProcessor, "_get_last_downloaded_action_id")
     @patch.object(SessionActionProcessor, "_get_session_actions_from_deadline")
@@ -759,5 +675,253 @@ class TestSessionActionProcessor:
             job_ids, farm_id, queue_id, last_lookback_time
         )
 
-        # Verify that no session actions are returned
-        assert result == {}
+        # Verify that no session actions are returned since the action ID is less than the last downloaded ID
+        assert isinstance(result, list)
+        assert len(result) == 0
+
+    def test_get_updated_list_of_ongoing_sessions_pending_download_running_sessions(
+        self, mock_boto3_session, mock_print_function, sample_download_progress
+    ):
+        """
+        Test get_updated_list_of_ongoing_sessions_pending_download method with running sessions.
+        """
+        processor = SessionActionProcessor(
+            boto3_session=mock_boto3_session,
+            download_progress=sample_download_progress,
+            print_function_callback=mock_print_function,
+        )
+
+        # Set up session maps - only include the sessions we want to test
+        processor.session_to_job_map = {
+            "session-456": "job-123",  # RUNNING session
+            "session-789": "job-456",  # FAILED session
+        }
+        processor.session_to_lifecycle_status_map = {
+            "session-456": "RUNNING",
+            "session-789": "FAILED",
+        }
+        processor.session_to_last_downloaded_action_id = {
+            "session-456": "session-456-3",
+            "session-789": "session-789-2",
+        }
+        processor.session_to_last_finished_action_id = {
+            "session-456": "session-456-4",  # Last finished is higher than last downloaded
+            "session-789": "session-789-1",  # Last finished is lower than last downloaded
+        }
+
+        # Downloaded session action IDs
+        downloaded_session_action_ids = [
+            "session-456-3",  # Not the last action for session-456
+            "session-789-2",  # Last action for session-789
+        ]
+
+        result = processor.get_updated_list_of_ongoing_sessions_pending_download(
+            downloaded_session_action_ids
+        )
+
+        # Verify the result - should include both RUNNING session and FAILED session with undownloaded actions
+        assert len(result) == 2
+
+        # Check that the sessions are included with correct properties
+        session_456 = next((s for s in result if s.session_id == "session-456"), None)
+        assert session_456 is not None
+        assert session_456.job_id == "job-123"
+        assert session_456.session_lifecycle_status == "RUNNING"
+        assert session_456.last_downloaded_sess_action_id == 3
+
+        session_789 = next((s for s in result if s.session_id == "session-789"), None)
+        assert session_789 is not None
+        assert session_789.job_id == "job-456"
+        assert session_789.session_lifecycle_status == "FAILED"
+        assert session_789.last_downloaded_sess_action_id == 2
+
+    def test_get_updated_list_of_ongoing_sessions_pending_download_ended_sessions(
+        self, mock_boto3_session, mock_print_function, sample_download_progress
+    ):
+        """
+        Test get_updated_list_of_ongoing_sessions_pending_download method with ended sessions.
+        """
+        processor = SessionActionProcessor(
+            boto3_session=mock_boto3_session,
+            download_progress=sample_download_progress,
+            print_function_callback=mock_print_function,
+        )
+
+        # Set up session maps - only include the sessions we want to test
+        processor.session_to_job_map = {
+            "session-456": "job-123",
+            "session-789": "job-456",
+        }
+        processor.session_to_lifecycle_status_map = {
+            "session-456": "ENDED",
+            "session-789": "ENDED",
+        }
+        processor.session_to_last_downloaded_action_id = {
+            "session-456": "session-456-3",
+            "session-789": "session-789-2",
+        }
+        processor.session_to_last_finished_action_id = {
+            "session-456": "session-456-4",  # Last finished is higher than last downloaded
+            "session-789": "session-789-1",  # Last finished is lower than last downloaded
+        }
+
+        # Downloaded session action IDs
+        downloaded_session_action_ids = [
+            "session-456-3",
+            "session-789-2",
+        ]
+
+        result = processor.get_updated_list_of_ongoing_sessions_pending_download(
+            downloaded_session_action_ids
+        )
+
+        # Verify the result - should include both session-456 (not fully downloaded) and session-789 (last finished < last downloaded)
+        assert len(result) == 2
+
+        # Check that session-456 is included with correct properties
+        session_456 = next((s for s in result if s.session_id == "session-456"), None)
+        assert session_456 is not None
+        assert session_456.job_id == "job-123"
+        assert session_456.session_lifecycle_status == "ENDED"
+        assert session_456.last_downloaded_sess_action_id == 3
+
+        # Check that session-789 is included with correct properties
+        session_789 = next((s for s in result if s.session_id == "session-789"), None)
+        assert session_789 is not None
+        assert session_789.job_id == "job-456"
+        assert session_789.session_lifecycle_status == "ENDED"
+        assert session_789.last_downloaded_sess_action_id == 2
+
+    def test_get_updated_list_of_ongoing_sessions_pending_download_no_last_action(
+        self, mock_boto3_session, mock_print_function, sample_download_progress
+    ):
+        """
+        Test get_updated_list_of_ongoing_sessions_pending_download method with no last action.
+        """
+        processor = SessionActionProcessor(
+            boto3_session=mock_boto3_session,
+            download_progress=sample_download_progress,
+            print_function_callback=mock_print_function,
+        )
+
+        # Set up session maps
+        processor.session_to_job_map = {
+            "session-123": "job-123",
+        }
+        processor.session_to_lifecycle_status_map = {
+            "session-123": "ENDED",
+        }
+        processor.session_to_last_downloaded_action_id = {
+            "session-123": "session-123-5",
+        }
+        # No last finished action ID for session-123
+        processor.session_to_last_finished_action_id = {}
+
+        # Downloaded session action IDs
+        downloaded_session_action_ids = [
+            "session-123-5",
+        ]
+
+        result = processor.get_updated_list_of_ongoing_sessions_pending_download(
+            downloaded_session_action_ids
+        )
+
+        # Verify the result
+        assert len(result) == 1  # Should include session-123 (ENDED but no last finished action)
+
+        # Check that session-123 is included with correct properties
+        session_123 = result[0]
+        assert session_123.session_id == "session-123"
+        assert session_123.job_id == "job-123"
+        assert session_123.session_lifecycle_status == "ENDED"
+        assert session_123.last_downloaded_sess_action_id == 5
+
+    def test_get_updated_list_of_ongoing_sessions_pending_download_empty_input(
+        self, mock_boto3_session, mock_print_function, sample_download_progress
+    ):
+        """
+        Test get_updated_list_of_ongoing_sessions_pending_download method with empty input.
+        """
+        processor = SessionActionProcessor(
+            boto3_session=mock_boto3_session,
+            download_progress=sample_download_progress,
+            print_function_callback=mock_print_function,
+        )
+
+        # Set up session maps
+        processor.session_to_job_map = {
+            "session-123": "job-123",
+            "session-456": "job-123",
+        }
+        processor.session_to_lifecycle_status_map = {
+            "session-123": "RUNNING",
+            "session-456": "ENDED",
+        }
+        processor.session_to_last_downloaded_action_id = {}
+        processor.session_to_last_finished_action_id = {}
+
+        # Empty downloaded session action IDs
+        downloaded_session_action_ids: List[str] = []
+
+        result = processor.get_updated_list_of_ongoing_sessions_pending_download(
+            downloaded_session_action_ids
+        )
+
+        # Verify the result
+        assert len(result) == 2  # Should include both sessions
+
+        # Check that both sessions are included with correct properties
+        session_123 = next((s for s in result if s.session_id == "session-123"), None)
+        assert session_123 is not None
+        assert session_123.job_id == "job-123"
+        assert session_123.session_lifecycle_status == "RUNNING"
+        assert session_123.last_downloaded_sess_action_id == 0
+
+        session_456 = next((s for s in result if s.session_id == "session-456"), None)
+        assert session_456 is not None
+        assert session_456.job_id == "job-123"
+        assert session_456.session_lifecycle_status == "ENDED"
+        assert session_456.last_downloaded_sess_action_id == 0
+
+    def test_get_updated_list_of_ongoing_sessions_pending_download_invalid_action_ids(
+        self, mock_boto3_session, mock_print_function, sample_download_progress
+    ):
+        """
+        Test get_updated_list_of_ongoing_sessions_pending_download method with invalid action IDs.
+        """
+        processor = SessionActionProcessor(
+            boto3_session=mock_boto3_session,
+            download_progress=sample_download_progress,
+            print_function_callback=mock_print_function,
+        )
+
+        # Set up session maps
+        processor.session_to_job_map = {
+            "session-123": "job-123",
+        }
+        processor.session_to_lifecycle_status_map = {
+            "session-123": "RUNNING",
+        }
+        processor.session_to_last_downloaded_action_id = {}
+        processor.session_to_last_finished_action_id = {}
+
+        # Invalid downloaded session action IDs
+        downloaded_session_action_ids = [
+            "invalid-action-id",
+            "session-123",  # Missing action number
+            "session-456-abc",  # Non-numeric action number
+        ]
+
+        result = processor.get_updated_list_of_ongoing_sessions_pending_download(
+            downloaded_session_action_ids
+        )
+
+        # Verify the result
+        assert len(result) == 1  # Should include session-123
+
+        # Check that session-123 is included with correct properties
+        session_123 = result[0]
+        assert session_123.session_id == "session-123"
+        assert session_123.job_id == "job-123"
+        assert session_123.session_lifecycle_status == "RUNNING"
+        assert session_123.last_downloaded_sess_action_id == 0  # No valid action ID was processed

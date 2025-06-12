@@ -8,10 +8,12 @@ from typing import Optional, Callable, Set, List
 import boto3
 from deadline.client import _pid_utils
 from deadline.job_attachments.incremental_downloads.incremental_download_state import (
+    JobSession,
     IncrementalDownloadState,
     bootstrap_fresh_state,
     load_progress_from_state_file,
     save_progress_to_state_file,
+    update_download_state_using_ongoing_sessions,
 )
 import datetime
 
@@ -64,6 +66,8 @@ def _incremental_output_download(
                 Used in the CLI to print to stdout using click.echo. By default, ignores messages.
     :return: None
     """
+    command_start_time: str = datetime.datetime.utcnow().isoformat()
+
     # 1. Construct pid file full path
     pid_file_full_path = os.path.join(
         saved_progress_checkpoint_location, f"{queue_id}_{PID_FILE_NAME}"
@@ -136,14 +140,25 @@ def _incremental_output_download(
         )
 
         print_function_callback(
-            f"Downloaded outputs for session action ids: {downloaded_session_action_ids}"
+            f"Downloaded outputs for {downloaded_session_action_ids} session action ids"
         )
 
-        # Right now updated download progress is set to no change except setting the last lookback time to now
-        updated_download_progress: IncrementalDownloadState = current_download_progress
-        updated_download_progress.last_lookback_time = datetime.datetime.utcnow().isoformat()
+        # 8. Get ongoing sessions still pending download
+        ongoing_sessions_pending_download: List[JobSession] = (
+            session_action_processor.get_updated_list_of_ongoing_sessions_pending_download(
+                downloaded_session_action_ids
+            )
+        )
 
-        # 8. Save progress to incremental download state file
+        # 9. Get updated download progress state using the ongoing sessions pending download & current download progress
+        updated_download_progress: IncrementalDownloadState = (
+            update_download_state_using_ongoing_sessions(
+                ongoing_sessions_pending_download,
+                command_start_time,
+            )
+        )
+
+        # 10. Save progress to incremental download state file
         save_progress_to_state_file(
             saved_progress_checkpoint_location,
             saved_progress_checkpoint_full_path,

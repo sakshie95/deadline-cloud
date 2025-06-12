@@ -12,7 +12,11 @@ class JobSession:
     """
 
     def __init__(
-        self, session_id: str, session_lifecycle_status: str, last_downloaded_sess_action_id: int
+        self,
+        session_id: str,
+        session_lifecycle_status: str,
+        last_downloaded_sess_action_id: int,
+        job_id: str = "",
     ):
         """
         Initialize a JobSession instance.
@@ -20,10 +24,12 @@ class JobSession:
             session_id (str): The ID of the session
             session_lifecycle_status (str): The lifecycle status of the session
             last_downloaded_sess_action_id (int): The ID of the last downloaded session action
+            job_id (str): The ID of the job this session belongs to (optional)
         """
         self.session_id = session_id
         self.session_lifecycle_status = session_lifecycle_status
         self.last_downloaded_sess_action_id = last_downloaded_sess_action_id
+        self.job_id = job_id
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
@@ -38,6 +44,7 @@ class JobSession:
             session_id=str(data.get("sessionId", "")),
             session_lifecycle_status=str(data.get("sessionLifecycleStatus", "")),
             last_downloaded_sess_action_id=int(data.get("lastDownloadedSessActionId", 0)),
+            job_id=str(data.get("jobId", "")),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -46,11 +53,14 @@ class JobSession:
         Returns:
             dict: Dictionary representation of the session
         """
-        return {
+        result = {
             "sessionId": self.session_id,
             "sessionLifecycleStatus": self.session_lifecycle_status,
             "lastDownloadedSessActionId": self.last_downloaded_sess_action_id,
         }
+        if self.job_id:
+            result["jobId"] = self.job_id
+        return result
 
 
 class Job:
@@ -177,6 +187,69 @@ class IncrementalDownloadState:
 
     def get_last_lookback_time(self) -> str:
         return self.last_lookback_time
+
+
+def update_download_state_using_ongoing_sessions(
+    ongoing_sessions: List[JobSession],
+    command_start_time: str,
+) -> IncrementalDownloadState:
+    """
+    Update the download state using the list of ongoing sessions.
+
+    Args:
+        ongoing_sessions: List of JobSession objects for sessions that need processing
+        command_start_time: The start time of the command, to be used as the new lookback time
+
+    Returns:
+        Updated IncrementalDownloadState object
+    """
+    updated_state = IncrementalDownloadState()
+
+    # Update the last lookback time to the command start time
+    updated_state.last_lookback_time = command_start_time
+
+    # Create a set of jobs that have at least one session in the current download progress
+    job_ids_with_sessions: Set[str] = set()
+
+    # Process each ongoing session
+    for job_session in ongoing_sessions:
+        job_id = job_session.job_id
+        session_id = job_session.session_id
+
+        # Add the job ID to the set of jobs with sessions
+        job_ids_with_sessions.add(job_id)
+
+        # Find or create the job in the state
+        job_state = next((job for job in updated_state.jobs if job.job_id == job_id), None)
+        if job_state is None:
+            job_state = Job(job_id=job_id, sessions=[])
+            updated_state.jobs.append(job_state)
+
+        # Find or create the session in the job state
+        session_state = next((s for s in job_state.sessions if s.session_id == session_id), None)
+
+        if session_state is None:
+            # Create a new JobSession without the job_id field to avoid duplication
+            new_session = JobSession(
+                session_id=job_session.session_id,
+                session_lifecycle_status=job_session.session_lifecycle_status,
+                last_downloaded_sess_action_id=job_session.last_downloaded_sess_action_id,
+            )
+            job_state.sessions.append(new_session)
+        else:
+            # Update the existing session state
+            session_state.session_lifecycle_status = job_session.session_lifecycle_status
+
+            # Update the last downloaded action ID if it's higher
+            if (
+                job_session.last_downloaded_sess_action_id
+                > session_state.last_downloaded_sess_action_id
+            ):
+                session_state.last_downloaded_sess_action_id = (
+                    job_session.last_downloaded_sess_action_id
+                )
+
+    return updated_state
 
 
 def bootstrap_fresh_state(
