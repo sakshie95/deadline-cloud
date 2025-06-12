@@ -163,9 +163,6 @@ def save_progress_to_state_file(
         # 4. Write the state data to the temporary file
         with open(temp_file_path, "w") as file:
             json.dump(state_data, file, indent=2)
-            # Ensure data is written to disk
-            file.flush()
-            os.fsync(file.fileno())
 
         # 5. Atomically replace the target file with the temporary file
         os.replace(temp_file_path, current_saved_progress_checkpoint_full_path)
