@@ -18,10 +18,9 @@ OVERLAP_SIZE = 10
 
 def get_list_of_ongoing_jobs_on_queue(
     boto3_session: boto3.Session,
-    last_known_set_of_ongoing_jobs: Set[str],
     farm_id: str,
     queue_id: str,
-    last_lookback_time: str,
+    timestamp: datetime,
     print_function_callback: Callable[[str], None] = lambda msg: None,
 ) -> Set[str]:
     """
@@ -34,18 +33,17 @@ def get_list_of_ongoing_jobs_on_queue(
     We restart the polling again for an inconsistent response case.
 
     :param boto3_session: boto3.Session
-    :param last_known_set_of_ongoing_jobs: last known set of ongoing job IDs
     :param farm_id: farm ID
     :param queue_id: queue ID
-    :param last_lookback_time: lookback time to look for jobs updated since
+    :param timestamp: timestamp to get jobs updated since then
     :param print_function_callback: Callback to print messages produced in this function.
                 Used in the CLI to print to stdout using click.echo. By default, ignores messages.
     :return: set of ongoing job IDs
     """
-    print_function_callback(f"Querying for jobs in queue {queue_id} since {last_lookback_time}")
+    print_function_callback(f"Querying for jobs in queue {queue_id} since {timestamp}")
 
-    # Create a copy of the input set to avoid modifying the original
-    result_set = set(last_known_set_of_ongoing_jobs)
+    # Create a result set for the output of jobs to be returned
+    result_set = set()
 
     # Set up filters for the search - jobs updated since last lookback time
     filter_expressions: dict = {
@@ -53,7 +51,7 @@ def get_list_of_ongoing_jobs_on_queue(
             {
                 "dateTimeFilter": {
                     "name": "UPDATED_AT",
-                    "dateTime": datetime.fromisoformat(last_lookback_time),
+                    "dateTime": timestamp,
                     "operator": "GREATER_THAN",
                 }
             }
@@ -144,7 +142,7 @@ def get_list_of_ongoing_jobs_on_queue(
     # Add all collected job IDs to the result set
     result_set.update(all_job_ids)
 
-    print_function_callback(f"Found {len(all_job_ids)} jobs updated since {last_lookback_time}")
+    print_function_callback(f"Found {len(all_job_ids)} jobs updated since {timestamp}")
     print_function_callback(f"Total ongoing jobs: {len(result_set)}")
 
     return result_set

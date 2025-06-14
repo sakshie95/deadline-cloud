@@ -22,7 +22,6 @@ from configparser import ConfigParser
 from typing import Optional
 import boto3
 import os
-from deadline.client.api._queue_apis import DOWNLOAD_PROGRESS_FILE_NAME
 
 
 @click.group(name="queue")
@@ -298,29 +297,19 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
             required_options={"farm_id", "queue_id"}, **args
         )
 
-        # Get the default configs
         farm_id = config_file.get_setting("defaults.farm_id", config=config)
         queue_id = config_file.get_setting("defaults.queue_id", config=config)
+
         boto3_session: boto3.Session = api.get_boto3_session(config=config)
 
-        # Get download progress file name appended by the queue id - a unique progress file exists per queue
-        download_progress_file_name: str = f"{queue_id}_{DOWNLOAD_PROGRESS_FILE_NAME}"
-
-        # Get saved progress file full path now that we've validated all file inputs are valid
-        saved_progress_checkpoint_full_path: str = os.path.join(
-            saved_progress_checkpoint_location, download_progress_file_name
-        )
-
-        # Call the incremental output download api to download outputs
+        # Call the incremental output download api
         _queue_apis._incremental_output_download(
             boto3_session=boto3_session,
             farm_id=farm_id,
             queue_id=queue_id,
             saved_progress_checkpoint_location=saved_progress_checkpoint_location,
             bootstrap_lookback_in_minutes=bootstrap_lookback_in_minutes,
-            # True if either the option is provided by customer or saved progress checkpoint file does not exist
-            force_bootstrap=force_bootstrap
-            or not os.path.exists(saved_progress_checkpoint_full_path),
+            force_bootstrap=force_bootstrap,
             path_mapping_rules=path_mapping_rules,
             print_function_callback=logger.echo,
         )
