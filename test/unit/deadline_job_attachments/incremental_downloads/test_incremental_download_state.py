@@ -9,9 +9,6 @@ from unittest.mock import MagicMock
 
 from deadline.job_attachments.incremental_downloads.incremental_download_state import (
     IncrementalDownloadState,
-    bootstrap_fresh_state,
-    load_progress_from_state_file,
-    save_progress_to_state_file,
 )
 from freezegun import freeze_time
 
@@ -107,7 +104,7 @@ class TestIncrementalDownloadState:
         bootstrap_lookback_in_minutes = 60
 
         # Execute
-        result = bootstrap_fresh_state(
+        result = IncrementalDownloadState.from_bootstrap(
             bootstrap_lookback_in_minutes,
             mock_logger.echo,
         )
@@ -122,7 +119,7 @@ class TestIncrementalDownloadState:
         Test bootstrap_fresh_state without lookback minutes.
         """
         # Execute
-        result = bootstrap_fresh_state(
+        result = IncrementalDownloadState.from_bootstrap(
             None,
             mock_logger.echo,
         )
@@ -137,7 +134,7 @@ class TestIncrementalDownloadState:
         Uses a real file instead of mocking.
         """
         # Execute
-        result = load_progress_from_state_file(
+        result = IncrementalDownloadState.from_file(
             state_file,
             mock_logger.echo,
         )
@@ -155,7 +152,7 @@ class TestIncrementalDownloadState:
 
         # Execute and Assert
         with pytest.raises(Exception):
-            load_progress_from_state_file(
+            IncrementalDownloadState.from_file(
                 non_existent_file,
                 mock_logger.echo,
             )
@@ -166,7 +163,7 @@ class TestIncrementalDownloadState:
         Uses real file operations instead of mocking.
         """
         # Execute
-        save_progress_to_state_file(
+        IncrementalDownloadState.save_file(
             test_paths["location"],
             test_paths["progress_file"],
             mock_state,
@@ -193,7 +190,7 @@ class TestIncrementalDownloadState:
 
         # Execute and Assert
         with pytest.raises(Exception):
-            save_progress_to_state_file(
+            IncrementalDownloadState.save_file(
                 invalid_location,
                 invalid_file,
                 mock_state,
