@@ -152,13 +152,8 @@ class IncrementalDownloadState:
         """
 
         try:
-            # Get checkpoint location directory from full path
-            saved_progress_checkpoint_location = os.path.dirname(
-                saved_progress_checkpoint_full_path
-            )
-
             # 1. Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(saved_progress_checkpoint_location), exist_ok=True)
+            os.makedirs(os.path.dirname(saved_progress_checkpoint_full_path), exist_ok=True)
 
             # 2. Convert the IncrementalDownloadState to a dictionary
             state_data = self.to_dict()
