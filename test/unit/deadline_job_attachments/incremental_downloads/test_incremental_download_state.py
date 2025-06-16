@@ -164,9 +164,8 @@ class TestIncrementalDownloadState:
         Uses real file operations instead of mocking.
         """
         # Execute
-        IncrementalDownloadState.save_file(
+        mock_state.save_file(
             test_paths["progress_file"],
-            mock_state,
             mock_logger.echo,
         )
 
@@ -189,9 +188,8 @@ class TestIncrementalDownloadState:
 
         # Execute and Assert
         with pytest.raises(Exception):
-            IncrementalDownloadState.save_file(
+            mock_state.save_file(
                 invalid_file,
-                mock_state,
                 mock_logger.echo,
             )
 

@@ -135,18 +135,15 @@ class IncrementalDownloadState:
             # Raise as this is an unexpected exception in reading state file, we already checked its existence earlier
             raise
 
-    @classmethod
     def save_file(
-        cls,
+        self,
         saved_progress_checkpoint_full_path: str,
-        download_state: "IncrementalDownloadState",
         print_function_callback: Callable[[str], None],
     ) -> None:
         """
         Save the current download progress to a state file atomically.
 
         :param saved_progress_checkpoint_full_path: Absolute path of file with saved progress
-        :param download_state: The current download progress state
         :param print_function_callback: Callback to print messages produced in this function.
                 Used in the CLI to print to stdout using click.echo. By default, ignores messages
         :return: None if save was successful,
@@ -164,7 +161,7 @@ class IncrementalDownloadState:
             os.makedirs(os.path.dirname(saved_progress_checkpoint_location), exist_ok=True)
 
             # 2. Convert the IncrementalDownloadState to a dictionary
-            state_data = download_state.to_dict()
+            state_data = self.to_dict()
 
             # 3. Get a unique id for atomic file update and create a temporary file in the given directory
             unique_process_identifier = str(os.getpid())
