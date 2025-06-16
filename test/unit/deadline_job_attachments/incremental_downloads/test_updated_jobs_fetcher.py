@@ -7,7 +7,7 @@ from botocore.exceptions import ClientError
 
 from deadline.client.exceptions import DeadlineOperationError
 from deadline.job_attachments.incremental_downloads.updated_jobs_fetcher import (
-    get_list_of_ongoing_jobs_on_queue,
+    get_jobs_updated_since_timestamp,
     PAGE_SIZE,
     OVERLAP_SIZE,
 )
@@ -72,7 +72,7 @@ def test_get_list_of_ongoing_jobs_single_page(mock_boto3_session, mock_logger):
     mock_boto3_session.client().search_jobs.return_value = create_mock_jobs_response(1, 10)
 
     # Call the function
-    result = get_list_of_ongoing_jobs_on_queue(
+    result = get_jobs_updated_since_timestamp(
         boto3_session=mock_boto3_session,
         farm_id=MOCK_FARM_ID,
         queue_id=MOCK_QUEUE_ID,
@@ -101,7 +101,7 @@ def test_get_list_of_ongoing_jobs_multiple_pages(mock_boto3_session, mock_logger
     ]
 
     # Call the function
-    result = get_list_of_ongoing_jobs_on_queue(
+    result = get_jobs_updated_since_timestamp(
         boto3_session=mock_boto3_session,
         farm_id=MOCK_FARM_ID,
         queue_id=MOCK_QUEUE_ID,
@@ -167,7 +167,7 @@ def test_get_list_of_ongoing_jobs_with_inconsistency(mock_boto3_session, mock_lo
     setup_inconsistency_test_responses(mock_boto3_session, num_restarts=1)
 
     # Call the function
-    result = get_list_of_ongoing_jobs_on_queue(
+    result = get_jobs_updated_since_timestamp(
         boto3_session=mock_boto3_session,
         farm_id=MOCK_FARM_ID,
         queue_id=MOCK_QUEUE_ID,
@@ -193,7 +193,7 @@ def test_get_list_of_ongoing_jobs_empty_response(mock_boto3_session, mock_logger
     mock_boto3_session.client().search_jobs.return_value = {"jobs": [], "nextItemOffset": None}
 
     # Call the function
-    result = get_list_of_ongoing_jobs_on_queue(
+    result = get_jobs_updated_since_timestamp(
         boto3_session=mock_boto3_session,
         farm_id=MOCK_FARM_ID,
         queue_id=MOCK_QUEUE_ID,
@@ -218,7 +218,7 @@ def test_get_list_of_ongoing_jobs_api_error(mock_boto3_session, mock_logger):
 
     # Call the function and expect a DeadlineOperationError
     with pytest.raises(DeadlineOperationError) as excinfo:
-        get_list_of_ongoing_jobs_on_queue(
+        get_jobs_updated_since_timestamp(
             boto3_session=mock_boto3_session,
             farm_id=MOCK_FARM_ID,
             queue_id=MOCK_QUEUE_ID,
@@ -237,7 +237,7 @@ def test_get_list_of_ongoing_jobs_multiple_restarts(mock_boto3_session, mock_log
     setup_inconsistency_test_responses(mock_boto3_session, num_restarts=2)
 
     # Call the function
-    result = get_list_of_ongoing_jobs_on_queue(
+    result = get_jobs_updated_since_timestamp(
         boto3_session=mock_boto3_session,
         farm_id=MOCK_FARM_ID,
         queue_id=MOCK_QUEUE_ID,
@@ -262,7 +262,7 @@ def test_get_list_of_ongoing_jobs_no_next_item_offset(mock_boto3_session, mock_l
     }
 
     # Call the function
-    result = get_list_of_ongoing_jobs_on_queue(
+    result = get_jobs_updated_since_timestamp(
         boto3_session=mock_boto3_session,
         farm_id=MOCK_FARM_ID,
         queue_id=MOCK_QUEUE_ID,

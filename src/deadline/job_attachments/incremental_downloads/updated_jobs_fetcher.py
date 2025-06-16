@@ -16,7 +16,7 @@ PAGE_SIZE = 100
 OVERLAP_SIZE = 10
 
 
-def get_list_of_ongoing_jobs_on_queue(
+def get_jobs_updated_since_timestamp(
     boto3_session: boto3.Session,
     farm_id: str,
     queue_id: str,
