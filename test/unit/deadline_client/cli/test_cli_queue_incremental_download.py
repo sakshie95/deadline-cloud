@@ -109,7 +109,7 @@ def sample_progress_data():
     os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is None,
     reason="Incremental output download is not enabled",
 )
-@freeze_time("2025-05-26 12:00:00")
+@freeze_time("2025-05-26 12:00:00+00:00")
 @patch("deadline.client.api.get_boto3_session")
 @patch.dict(os.environ, {"ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD": "True"})
 def test_incremental_output_download_success_load_from_progress(
@@ -148,7 +148,7 @@ def test_incremental_output_download_success_load_from_progress(
         updated_progress = json.load(f)
 
     # Verify the lastLookbackTime was updated to the frozen time
-    assert updated_progress["lastLookbackTime"] == "2025-05-26T12:00:00"
+    assert updated_progress["lastLookbackTime"] == "2025-05-26T12:00:00+00:00"
 
     # Verify the job data was preserved
     assert len(updated_progress["jobs"]) == 2
@@ -159,7 +159,7 @@ def test_incremental_output_download_success_load_from_progress(
     os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is None,
     reason="Incremental output download is not enabled",
 )
-@freeze_time("2025-05-26 12:00:00")
+@freeze_time("2025-05-26 12:00:00+00:00")
 @patch("deadline.client.api.get_boto3_session")
 @patch.dict(os.environ, {"ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD": "True"})
 @pytest.mark.parametrize("bootstrap_lookback_in_minutes", [60, None])
@@ -202,7 +202,7 @@ def test_incremental_output_download_success_with_force_bootstrap(
         updated_progress = json.load(f)
 
     # Verify the lastLookbackTime was updated to the frozen time
-    assert updated_progress["lastLookbackTime"] == "2025-05-26T12:00:00"
+    assert updated_progress["lastLookbackTime"] == "2025-05-26T12:00:00+00:00"
 
     # Verify the jobs list is empty (as it would be with a fresh bootstrap)
     assert updated_progress["jobs"] == []

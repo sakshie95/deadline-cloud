@@ -358,7 +358,6 @@ if os.environ.get("ENABLE_INCREMENTAL_OUTPUT_DOWNLOAD") is not None:
 
             # 6. Save progress to incremental download state file
             IncrementalDownloadState.save_file(
-                saved_progress_checkpoint_location,
                 saved_progress_checkpoint_full_path,
                 updated_download_progress,
                 logger.echo,

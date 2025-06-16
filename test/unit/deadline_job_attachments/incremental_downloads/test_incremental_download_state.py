@@ -11,6 +11,7 @@ from deadline.job_attachments.incremental_downloads.incremental_download_state i
     IncrementalDownloadState,
 )
 from freezegun import freeze_time
+from datetime import datetime
 
 
 class TestIncrementalDownloadState:
@@ -80,7 +81,7 @@ class TestIncrementalDownloadState:
         Fixture to create a sample IncrementalDownloadState.
         """
         model = IncrementalDownloadState()
-        model.last_lookback_time = "2023-01-01T00:00:00Z"
+        model.last_lookback_time = datetime.fromisoformat("2023-01-01T00:00:00")
         model.jobs = [
             {
                 "jobId": "job-123",
@@ -95,7 +96,7 @@ class TestIncrementalDownloadState:
         ]
         return model
 
-    @freeze_time("2025-05-26 12:00:00")
+    @freeze_time("2025-05-26 12:00:00+00:00")
     def test_bootstrap_fresh_state(self, mock_logger):
         """
         Test bootstrap_fresh_state with lookback minutes.
@@ -110,10 +111,10 @@ class TestIncrementalDownloadState:
         )
 
         # Assert
-        assert result.last_lookback_time.isoformat() == "2025-05-26T11:00:00"
+        assert result.last_lookback_time.isoformat() == "2025-05-26T11:00:00+00:00"
         assert result.jobs == []
 
-    @freeze_time("2025-05-26 12:00:00")
+    @freeze_time("2025-05-26 12:00:00+00:00")
     def test_bootstrap_fresh_state_no_lookback(self, mock_logger):
         """
         Test bootstrap_fresh_state without lookback minutes.
@@ -125,7 +126,7 @@ class TestIncrementalDownloadState:
         )
 
         # Assert
-        assert result.last_lookback_time.isoformat() == "2025-05-26T12:00:00"
+        assert result.last_lookback_time.isoformat() == "2025-05-26T12:00:00+00:00"
         assert result.jobs == []
 
     def test_load_progress_from_state_file(self, mock_logger, state_file, sample_state_data):
@@ -164,7 +165,6 @@ class TestIncrementalDownloadState:
         """
         # Execute
         IncrementalDownloadState.save_file(
-            test_paths["location"],
             test_paths["progress_file"],
             mock_state,
             mock_logger.echo,
@@ -177,7 +177,7 @@ class TestIncrementalDownloadState:
         with open(test_paths["progress_file"], "r") as f:
             saved_data = json.load(f)
 
-        assert saved_data["lastLookbackTime"] == mock_state.last_lookback_time
+        assert saved_data["lastLookbackTime"] == mock_state.last_lookback_time.isoformat()
         assert saved_data["jobs"] == mock_state.jobs
 
     def test_save_progress_to_state_file_exception(self, mock_logger, mock_state):
@@ -185,13 +185,11 @@ class TestIncrementalDownloadState:
         Test save_progress_to_state_file when an exception occurs due to invalid path.
         """
         # Use an invalid path that will cause an exception
-        invalid_location = "/invalid/path/that/does/not/exist"
         invalid_file = "/invalid/path/that/does/not/exist/file.json"
 
         # Execute and Assert
         with pytest.raises(Exception):
             IncrementalDownloadState.save_file(
-                invalid_location,
                 invalid_file,
                 mock_state,
                 mock_logger.echo,
@@ -207,7 +205,7 @@ class TestIncrementalDownloadState:
         assert state.jobs == []
 
         # Test with provided values
-        last_lookback_time = "2023-01-01T00:00:00Z"
+        last_lookback_time = datetime.fromisoformat("2023-01-01T00:00:00")
         jobs = [{"jobId": "job-123", "sessions": []}]
         state = IncrementalDownloadState(last_lookback_time=last_lookback_time, jobs=jobs)
         assert state.last_lookback_time == last_lookback_time
@@ -253,7 +251,7 @@ class TestIncrementalDownloadState:
         Test IncrementalDownloadState.to_dict method.
         """
         # Create a state
-        last_lookback_time = "2023-01-01T00:00:00Z"
+        last_lookback_time = datetime.fromisoformat("2023-01-01T00:00:00")
         jobs = [
             {
                 "jobId": "job-123",
@@ -272,4 +270,4 @@ class TestIncrementalDownloadState:
         result = state.to_dict()
 
         # Assert
-        assert result == {"lastLookbackTime": last_lookback_time, "jobs": jobs}
+        assert result == {"lastLookbackTime": last_lookback_time.isoformat(), "jobs": jobs}

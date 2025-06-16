@@ -40,10 +40,10 @@ def _incremental_output_download(
     """
     # Download outputs for ongoing jobs using current download progress
     # Right now it is set to no change in progress except setting the last lookback time to now
-    updated_download_progress: IncrementalDownloadState = download_state
-    updated_download_progress.last_lookback_time = datetime.datetime.utcnow().isoformat()
+    updated_downloaded_state: IncrementalDownloadState = download_state
+    updated_downloaded_state.last_lookback_time = datetime.datetime.now(datetime.timezone.utc)
 
-    return updated_download_progress
+    return updated_downloaded_state
 
 
 def _validate_file_inputs_for_incremental_output_download(

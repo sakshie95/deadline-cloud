@@ -2,8 +2,8 @@
 
 import json
 import os
-import datetime
-from typing import Optional, Callable
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Callable, List
 
 
 class IncrementalDownloadState:
@@ -43,11 +43,14 @@ class IncrementalDownloadState:
     }
     """
 
+    last_lookback_time: datetime
+    jobs: List[dict]
+
     def __init__(self, last_lookback_time=None, jobs=None):
         """
         Initialize a IncrementalDownloadState instance.
         Args:
-            last_lookback_time (str): ISO format timestamp of the last lookback time
+            last_lookback_time (datetime): datetime format timestamp of the last lookback time
             jobs (list): List of job dictionaries containing job_id and sessions information
         """
         self.last_lookback_time = last_lookback_time
@@ -73,7 +76,7 @@ class IncrementalDownloadState:
         Returns:
             dict: Dictionary representation of the state file model
         """
-        return {"lastLookbackTime": self.last_lookback_time, "jobs": self.jobs}
+        return {"lastLookbackTime": self.last_lookback_time.isoformat(), "jobs": self.jobs}
 
     @classmethod
     def from_bootstrap(
@@ -93,9 +96,8 @@ class IncrementalDownloadState:
         print_function_callback(
             "Bootstrapping command. Ignoring download progress location and creating new"
         )
-        current_download_progress.last_lookback_time = (
-            datetime.datetime.utcnow()
-            - datetime.timedelta(minutes=float(bootstrap_lookback_in_minutes or 0))
+        current_download_progress.last_lookback_time = datetime.now(timezone.utc) - timedelta(
+            minutes=float(bootstrap_lookback_in_minutes or 0)
         )
         return current_download_progress
 
@@ -114,14 +116,16 @@ class IncrementalDownloadState:
         or throws an exception if we're unable to read it as we already validated its existence
         """
         try:
+            state_data: dict = {}
             with open(saved_progress_checkpoint_full_path, "r") as file:
                 state_data = json.load(file)
-                current_download_progress: IncrementalDownloadState = (
-                    IncrementalDownloadState.from_dict(state_data)
-                )
-                print_function_callback(
-                    f"Loaded existing state file from download progress checkpoint location {saved_progress_checkpoint_full_path}"
-                )
+
+            current_download_progress: IncrementalDownloadState = (
+                IncrementalDownloadState.from_dict(state_data)
+            )
+            print_function_callback(
+                f"Loaded existing state file from download progress checkpoint location {saved_progress_checkpoint_full_path}"
+            )
             return current_download_progress
 
         except Exception as e:
@@ -134,7 +138,6 @@ class IncrementalDownloadState:
     @classmethod
     def save_file(
         cls,
-        saved_progress_checkpoint_location: str,
         saved_progress_checkpoint_full_path: str,
         download_state: "IncrementalDownloadState",
         print_function_callback: Callable[[str], None],
@@ -142,7 +145,6 @@ class IncrementalDownloadState:
         """
         Save the current download progress to a state file atomically.
 
-        :param saved_progress_checkpoint_location: Location to save the download progress file
         :param saved_progress_checkpoint_full_path: Absolute path of file with saved progress
         :param download_state: The current download progress state
         :param print_function_callback: Callback to print messages produced in this function.
@@ -153,6 +155,11 @@ class IncrementalDownloadState:
         """
 
         try:
+            # Get checkpoint location directory from full path
+            saved_progress_checkpoint_location = os.path.dirname(
+                saved_progress_checkpoint_full_path
+            )
+
             # 1. Create directory if it doesn't exist
             os.makedirs(os.path.dirname(saved_progress_checkpoint_location), exist_ok=True)
 
