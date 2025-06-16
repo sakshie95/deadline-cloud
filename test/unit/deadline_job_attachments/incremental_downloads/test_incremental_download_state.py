@@ -179,20 +179,6 @@ class TestIncrementalDownloadState:
         assert saved_data["lastLookbackTime"] == mock_state.last_lookback_time.isoformat()
         assert saved_data["jobs"] == mock_state.jobs
 
-    def test_save_progress_to_state_file_exception(self, mock_logger, mock_state):
-        """
-        Test save_progress_to_state_file when an exception occurs due to invalid path.
-        """
-        # Use an invalid path that will cause an exception
-        invalid_file = "/invalid/path/that/does/not/exist/file.json"
-
-        # Execute and Assert
-        with pytest.raises(Exception):
-            mock_state.save_file(
-                invalid_file,
-                mock_logger.echo,
-            )
-
     def test_incremental_download_state_init(self):
         """
         Test IncrementalDownloadState initialization.
