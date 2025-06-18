@@ -4,12 +4,14 @@ import datetime
 from unittest.mock import MagicMock
 import pytest
 from botocore.exceptions import ClientError
+from typing import cast
 
 from deadline.client.exceptions import DeadlineOperationError
 from deadline.job_attachments.incremental_downloads.updated_jobs_fetcher import (
     get_jobs_updated_since_timestamp,
     PAGE_SIZE,
     OVERLAP_SIZE,
+    JobFetchFailure,
 )
 
 # Constants for testing
@@ -84,108 +86,6 @@ def test_get_list_of_ongoing_jobs_single_page(mock_boto3_session, mock_logger):
     expected_result = {f"job-{i}" for i in range(1, 11)}
     assert result == expected_result
 
-    # Verify API call
-    mock_boto3_session.client().search_jobs.assert_called_once()
-    verify_search_jobs_call(mock_boto3_session, 0, 0)
-
-
-def test_get_list_of_ongoing_jobs_multiple_pages(mock_boto3_session, mock_logger):
-    """Test getting ongoing jobs with multiple pages of results."""
-    # Setup mock responses for multiple pages
-    mock_boto3_session.client().search_jobs.side_effect = [
-        create_mock_jobs_response(1, PAGE_SIZE, PAGE_SIZE),
-        create_mock_jobs_response(
-            PAGE_SIZE - OVERLAP_SIZE + 1, 2 * PAGE_SIZE - OVERLAP_SIZE, 2 * PAGE_SIZE - OVERLAP_SIZE
-        ),
-        create_mock_jobs_response(2 * PAGE_SIZE - 2 * OVERLAP_SIZE + 1, 250),
-    ]
-
-    # Call the function
-    result = get_jobs_updated_since_timestamp(
-        boto3_session=mock_boto3_session,
-        farm_id=MOCK_FARM_ID,
-        queue_id=MOCK_QUEUE_ID,
-        timestamp=MOCK_TIMESTAMP,
-        print_function_callback=mock_logger.echo,
-    )
-
-    # Verify results - should have 250 unique job IDs
-    expected_result = {f"job-{i}" for i in range(1, 251)}
-    assert result == expected_result
-    assert len(result) == 250
-
-    # Verify API calls
-    assert mock_boto3_session.client().search_jobs.call_count == 3
-
-    # Check calls
-    verify_search_jobs_call(mock_boto3_session, 0, 0)
-    verify_search_jobs_call(mock_boto3_session, 1, PAGE_SIZE - OVERLAP_SIZE)
-    verify_search_jobs_call(mock_boto3_session, 2, 2 * PAGE_SIZE - 2 * OVERLAP_SIZE)
-
-
-def setup_inconsistency_test_responses(mock_boto3_session, num_restarts=1):
-    """Helper function to set up mock responses for inconsistency tests.
-
-    Args:
-        mock_boto3_session: The mock boto3 session
-        num_restarts: Number of restarts to simulate
-    """
-    # Common response patterns
-    first_page = create_mock_jobs_response(1, PAGE_SIZE, PAGE_SIZE)
-    inconsistent_page = create_mock_jobs_response(
-        PAGE_SIZE - OVERLAP_SIZE + 1,
-        2 * PAGE_SIZE - OVERLAP_SIZE,
-        2 * PAGE_SIZE - OVERLAP_SIZE,
-        modify_ids=True,
-    )
-    consistent_page = create_mock_jobs_response(
-        PAGE_SIZE - OVERLAP_SIZE + 1, 2 * PAGE_SIZE - OVERLAP_SIZE, 2 * PAGE_SIZE - OVERLAP_SIZE
-    )
-    final_page = create_mock_jobs_response(2 * PAGE_SIZE - 2 * OVERLAP_SIZE + 1, 250)
-
-    # Build the response sequence based on number of restarts
-    responses = [first_page, inconsistent_page]  # Initial attempt
-
-    # Add responses for each restart
-    for i in range(num_restarts):
-        responses.append(first_page)  # Restart from first page
-
-        # For all but the last restart, add an inconsistent page
-        if i < num_restarts - 1:
-            responses.append(inconsistent_page)
-        else:
-            # Last restart gets consistent pages
-            responses.append(consistent_page)
-            responses.append(final_page)
-
-    mock_boto3_session.client().search_jobs.side_effect = responses
-
-
-def test_get_list_of_ongoing_jobs_with_inconsistency(mock_boto3_session, mock_logger):
-    """Test handling of inconsistency in pagination overlap."""
-    # Setup mock responses with an inconsistency in the second page
-    setup_inconsistency_test_responses(mock_boto3_session, num_restarts=1)
-
-    # Call the function
-    result = get_jobs_updated_since_timestamp(
-        boto3_session=mock_boto3_session,
-        farm_id=MOCK_FARM_ID,
-        queue_id=MOCK_QUEUE_ID,
-        timestamp=MOCK_TIMESTAMP,
-        print_function_callback=mock_logger.echo,
-    )
-
-    # Verify results - should have 250 unique job IDs after restart
-    expected_result = {f"job-{i}" for i in range(1, 251)}
-    assert result == expected_result
-    assert len(result) == 250
-
-    # Verify API calls - should be 5 calls due to the restart
-    assert mock_boto3_session.client().search_jobs.call_count == 5
-
-    # Check that after restart, we start from offset 0
-    verify_search_jobs_call(mock_boto3_session, 2, 0)
-
 
 def test_get_list_of_ongoing_jobs_empty_response(mock_boto3_session, mock_logger):
     """Test handling of empty response."""
@@ -204,10 +104,6 @@ def test_get_list_of_ongoing_jobs_empty_response(mock_boto3_session, mock_logger
     # Verify results - should be an empty set
     assert result == set()
     assert len(result) == 0
-
-    # Verify API call
-    mock_boto3_session.client().search_jobs.assert_called_once()
-    verify_search_jobs_call(mock_boto3_session, 0, 0)
 
 
 def test_get_list_of_ongoing_jobs_api_error(mock_boto3_session, mock_logger):
@@ -233,8 +129,88 @@ def test_get_list_of_ongoing_jobs_api_error(mock_boto3_session, mock_logger):
 
 def test_get_list_of_ongoing_jobs_multiple_restarts(mock_boto3_session, mock_logger):
     """Test handling of multiple inconsistencies requiring multiple restarts."""
+    # Create base timestamp
+    base_timestamp = datetime.datetime(2023, 1, 2, 0, 0, 0)
+
+    # Create first batch with increasing timestamps
+    batch1 = []
+    for i in range(1, PAGE_SIZE + 1):
+        job_timestamp = base_timestamp.replace(minute=i % 60, second=i % 60)
+        batch1.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
+    # Create inconsistent batch 1
+    batch2_inconsistent1 = []
+    # First OVERLAP_SIZE jobs are different (inconsistent with batch1)
+    for i in range(1, OVERLAP_SIZE + 1):
+        job_timestamp = base_timestamp.replace(hour=1, minute=i % 60, second=i % 60)
+        batch2_inconsistent1.append(
+            {
+                "jobId": f"job-{i}-different1",  # Different job IDs
+                "updatedAt": job_timestamp,
+            }
+        )
+
+    # Add the rest of batch2_inconsistent1
+    for i in range(OVERLAP_SIZE + 1, PAGE_SIZE + 1):
+        job_timestamp = base_timestamp.replace(hour=1, minute=i % 60, second=i % 60)
+        batch2_inconsistent1.append({"jobId": f"job-{PAGE_SIZE + i}-1", "updatedAt": job_timestamp})
+
+    # Create inconsistent batch 2
+    batch2_inconsistent2 = []
+    # First OVERLAP_SIZE jobs are different (inconsistent with batch1)
+    for i in range(1, OVERLAP_SIZE + 1):
+        job_timestamp = base_timestamp.replace(hour=1, minute=i % 60, second=i % 60)
+        batch2_inconsistent2.append(
+            {
+                "jobId": f"job-{i}-different2",  # Different job IDs
+                "updatedAt": job_timestamp,
+            }
+        )
+
+    # Add the rest of batch2_inconsistent2
+    for i in range(OVERLAP_SIZE + 1, PAGE_SIZE + 1):
+        job_timestamp = base_timestamp.replace(hour=1, minute=i % 60, second=i % 60)
+        batch2_inconsistent2.append({"jobId": f"job-{PAGE_SIZE + i}-2", "updatedAt": job_timestamp})
+
+    # Create consistent batch
+    batch2_consistent = []
+    # First OVERLAP_SIZE jobs should match the last OVERLAP_SIZE jobs from batch1
+    for i in range(PAGE_SIZE - OVERLAP_SIZE + 1, PAGE_SIZE + 1):
+        batch2_consistent.append({"jobId": f"job-{i}", "updatedAt": batch1[i - 1]["updatedAt"]})
+
+    # Add the rest of batch2_consistent
+    for i in range(PAGE_SIZE + 1, 2 * PAGE_SIZE - OVERLAP_SIZE + 1):
+        job_timestamp = base_timestamp.replace(hour=1, minute=i % 60, second=i % 60)
+        batch2_consistent.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
+    # Create final batch
+    batch3 = []
+    # First OVERLAP_SIZE jobs should match the last OVERLAP_SIZE jobs from batch2_consistent
+    for i in range(0, OVERLAP_SIZE):
+        original_index = len(batch2_consistent) - OVERLAP_SIZE + i
+        batch3.append(
+            {
+                "jobId": batch2_consistent[original_index]["jobId"],
+                "updatedAt": batch2_consistent[original_index]["updatedAt"],
+            }
+        )
+
+    # Add the rest of batch3
+    for i in range(2 * PAGE_SIZE - OVERLAP_SIZE + 1, 251):
+        job_timestamp = base_timestamp.replace(hour=2, minute=i % 60, second=i % 60)
+        batch3.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
     # Setup mock responses with multiple inconsistencies
-    setup_inconsistency_test_responses(mock_boto3_session, num_restarts=2)
+    mock_boto3_session.client().search_jobs.side_effect = [
+        {"jobs": batch1, "totalResults": 250},
+        {"jobs": batch2_inconsistent1, "totalResults": 250},  # First inconsistent batch
+        {"jobs": batch1, "totalResults": 250},  # Restart 1
+        {"jobs": batch2_inconsistent2, "totalResults": 250},  # Second inconsistent batch
+        {"jobs": batch1, "totalResults": 250},  # Restart 2
+        {"jobs": batch2_consistent, "totalResults": 250},  # Finally consistent batch
+        {"jobs": batch3, "totalResults": 250},
+        {"jobs": [], "totalResults": 0},
+    ]
 
     # Call the function
     result = get_jobs_updated_since_timestamp(
@@ -245,20 +221,56 @@ def test_get_list_of_ongoing_jobs_multiple_restarts(mock_boto3_session, mock_log
         print_function_callback=mock_logger.echo,
     )
 
+    # Collect all expected job IDs
+    expected_ids = set()
+    for job in batch1:
+        expected_ids.add(job["jobId"])
+    for job in batch2_consistent[OVERLAP_SIZE:]:  # Skip overlap jobs
+        expected_ids.add(job["jobId"])
+    for job in batch3[OVERLAP_SIZE:]:  # Skip overlap jobs
+        expected_ids.add(job["jobId"])
+
     # Verify results - should have 250 unique job IDs after restarts
-    expected_result = {f"job-{i}" for i in range(1, 251)}
-    assert result == expected_result
+    assert result == expected_ids
     assert len(result) == 250
 
-    # Verify API calls - should be 7 calls due to the two restarts
-    assert mock_boto3_session.client().search_jobs.call_count == 7
+
+def test_get_jobs_same_updated_at_timestamp(mock_boto3_session, mock_logger):
+    """Test handling when all jobs in a page have the same updatedAt timestamp."""
+    # Create a timestamp for all jobs
+    same_timestamp = datetime.datetime(2023, 1, 2, 0, 0, 0)
+
+    # Setup mock response with all jobs having the same updatedAt timestamp
+    # Make sure the last job has the same timestamp as the threshold_timestamp
+    jobs = []
+    for i in range(1, PAGE_SIZE + 1):
+        jobs.append({"jobId": f"job-{i}", "updatedAt": same_timestamp})
+
+    # Make sure the search_jobs is only called once to avoid infinite loop
+    mock_boto3_session.client().search_jobs.return_value = {"jobs": jobs, "totalResults": PAGE_SIZE}
+
+    # Call the function and expect a JobFetchFailure
+    with pytest.raises(JobFetchFailure) as excinfo:
+        get_jobs_updated_since_timestamp(
+            boto3_session=mock_boto3_session,
+            farm_id=MOCK_FARM_ID,
+            queue_id=MOCK_QUEUE_ID,
+            timestamp=same_timestamp,  # Use the same timestamp as the jobs
+            print_function_callback=mock_logger.echo,
+        )
+
+    # Verify the error message
+    assert "Failure fetching jobs as updatedAt is the same for all jobs in page" in str(
+        excinfo.value
+    )
 
 
-def test_get_list_of_ongoing_jobs_no_next_item_offset(mock_boto3_session, mock_logger):
-    """Test handling when nextItemOffset is missing but there are more pages."""
-    # Setup mock response with missing nextItemOffset
+def test_get_jobs_with_total_results(mock_boto3_session, mock_logger):
+    """Test handling of totalResults field in the response."""
+    # Setup mock response with totalResults
     mock_boto3_session.client().search_jobs.return_value = {
-        "jobs": [{"jobId": f"job-{i}"} for i in range(1, PAGE_SIZE + 1)]
+        "jobs": [{"jobId": f"job-{i}"} for i in range(1, 11)],
+        "totalResults": 10,
     }
 
     # Call the function
@@ -270,11 +282,206 @@ def test_get_list_of_ongoing_jobs_no_next_item_offset(mock_boto3_session, mock_l
         print_function_callback=mock_logger.echo,
     )
 
-    # Verify results - should have PAGE_SIZE job IDs
-    expected_result = {f"job-{i}" for i in range(1, PAGE_SIZE + 1)}
+    # Verify results
+    expected_result = {f"job-{i}" for i in range(1, 11)}
     assert result == expected_result
-    assert len(result) == PAGE_SIZE
+    assert len(result) == 10
 
-    # Verify API call - should only be called once since nextItemOffset is missing
-    mock_boto3_session.client().search_jobs.assert_called_once()
-    verify_search_jobs_call(mock_boto3_session, 0, 0)
+
+def test_get_all_jobs_without_inconsistency(mock_boto3_session, mock_logger):
+    """
+    Test that all jobs are fetched correctly when there are more than PAGE_SIZE jobs,
+    without any inconsistency between batches.
+    """
+    # Create timestamps for different batches - ensure they are different and increasing
+    base_timestamp = datetime.datetime(2023, 1, 2, 0, 0, 0)
+
+    # First batch - 100 jobs with strictly increasing timestamps
+    batch1 = []
+    for i in range(1, PAGE_SIZE + 1):
+        # Each job has a unique timestamp, strictly increasing
+        job_timestamp = base_timestamp + datetime.timedelta(minutes=i)
+        batch1.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
+    # Last timestamp from batch1 - this is crucial for the pagination to work
+    batch1_last_timestamp: datetime.datetime = cast(datetime.datetime, batch1[-1]["updatedAt"])
+
+    # Second batch - 100 jobs with strictly increasing timestamps
+    batch2 = []
+    # First OVERLAP_SIZE jobs should match the last OVERLAP_SIZE jobs from batch1
+    for i in range(PAGE_SIZE - OVERLAP_SIZE + 1, PAGE_SIZE + 1):
+        original_index = i - 1
+        batch2.append(
+            {
+                "jobId": batch1[original_index]["jobId"],
+                "updatedAt": batch1[original_index]["updatedAt"],
+            }
+        )
+
+    # Add the rest of batch2 with timestamps greater than batch1's last job
+    for i in range(PAGE_SIZE + 1, 2 * PAGE_SIZE - OVERLAP_SIZE + 1):
+        # Each job has a unique timestamp, strictly increasing
+        job_timestamp = batch1_last_timestamp + datetime.timedelta(minutes=i - PAGE_SIZE + 1)
+        batch2.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
+    # Last timestamp from batch2
+    batch2_last_timestamp: datetime.datetime = cast(datetime.datetime, batch2[-1]["updatedAt"])
+
+    # Third batch - remaining jobs with strictly increasing timestamps
+    batch3 = []
+    # First OVERLAP_SIZE jobs should match the last OVERLAP_SIZE jobs from batch2
+    for i in range(0, OVERLAP_SIZE):
+        original_index = len(batch2) - OVERLAP_SIZE + i
+        batch3.append(
+            {
+                "jobId": batch2[original_index]["jobId"],
+                "updatedAt": batch2[original_index]["updatedAt"],
+            }
+        )
+
+    # Add the rest of batch3 with timestamps greater than batch2's last job
+    for i in range(2 * PAGE_SIZE - OVERLAP_SIZE + 1, 3 * PAGE_SIZE - 2 * OVERLAP_SIZE + 1):
+        # Each job has a unique timestamp, strictly increasing
+        job_timestamp = batch2_last_timestamp + datetime.timedelta(
+            minutes=i - (2 * PAGE_SIZE - OVERLAP_SIZE) + 1
+        )
+        batch3.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
+    # Setup mock responses with empty final response to end the loop
+    mock_boto3_session.client().search_jobs.side_effect = [
+        {"jobs": batch1, "totalResults": 300},
+        {"jobs": batch2, "totalResults": 300},
+        {"jobs": batch3, "totalResults": 300},
+        {"jobs": [], "totalResults": 0},
+    ]
+
+    # Call the function
+    result = get_jobs_updated_since_timestamp(
+        boto3_session=mock_boto3_session,
+        farm_id=MOCK_FARM_ID,
+        queue_id=MOCK_QUEUE_ID,
+        timestamp=MOCK_TIMESTAMP,
+        print_function_callback=mock_logger.echo,
+    )
+
+    # Collect all expected job IDs
+    expected_ids = set()
+    for job in batch1:
+        expected_ids.add(job["jobId"])
+    for job in batch2[OVERLAP_SIZE:]:  # Skip overlap jobs
+        expected_ids.add(job["jobId"])
+    for job in batch3[OVERLAP_SIZE:]:  # Skip overlap jobs
+        expected_ids.add(job["jobId"])
+
+    # Verify results - should have all unique job IDs
+    assert result == expected_ids
+
+    # Verify that we got the expected number of jobs
+    expected_job_count = PAGE_SIZE + (PAGE_SIZE - OVERLAP_SIZE) + (PAGE_SIZE - OVERLAP_SIZE)
+    assert len(result) == expected_job_count
+
+
+def test_get_all_jobs_with_inconsistency(mock_boto3_session, mock_logger):
+    """
+    Test that all jobs are fetched correctly when there are more than PAGE_SIZE jobs,
+    with inconsistency between batches that triggers a restart.
+    """
+    # Create timestamps for different batches - ensure they are different and increasing
+    base_timestamp = datetime.datetime(2023, 1, 2, 0, 0, 0)
+
+    # Create batches of jobs with increasing timestamps
+    total_jobs = PAGE_SIZE * 3  # 300 jobs total
+
+    # First batch - 100 jobs with increasing timestamps
+    batch1_original = []
+    for i in range(1, PAGE_SIZE + 1):
+        # Each job has a unique timestamp, increasing by minutes
+        job_timestamp = base_timestamp.replace(minute=i % 60, second=i % 60)
+        batch1_original.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
+    # Second batch with inconsistent overlap - 100 jobs
+    batch2_inconsistent = []
+    # First OVERLAP_SIZE jobs are different (inconsistent with batch1)
+    for i in range(1, OVERLAP_SIZE + 1):
+        # Timestamps after batch1's last job
+        job_timestamp = base_timestamp.replace(hour=1, minute=i % 60, second=i % 60)
+        batch2_inconsistent.append(
+            {
+                "jobId": f"job-{i}-different",  # Different job IDs
+                "updatedAt": job_timestamp,
+            }
+        )
+
+    # Add the rest of batch2_inconsistent
+    for i in range(OVERLAP_SIZE + 1, PAGE_SIZE + 1):
+        # Timestamps after batch1's last job
+        job_timestamp = base_timestamp.replace(hour=1, minute=i % 60, second=i % 60)
+        batch2_inconsistent.append({"jobId": f"job-{PAGE_SIZE + i}", "updatedAt": job_timestamp})
+
+    # First batch after restart - same as original batch1
+    batch1_restart = batch1_original.copy()
+
+    # Second batch after restart - now with consistent overlap
+    batch2_consistent = []
+    # First OVERLAP_SIZE jobs should match the last OVERLAP_SIZE jobs from batch1
+    for i in range(PAGE_SIZE - OVERLAP_SIZE + 1, PAGE_SIZE + 1):
+        batch2_consistent.append(batch1_original[i - 1])  # Use the same job objects for overlap
+
+    # Add the rest of batch2_consistent with timestamps greater than batch1_last_timestamp
+    for i in range(PAGE_SIZE + 1, 2 * PAGE_SIZE - OVERLAP_SIZE + 1):
+        # Each job has a unique timestamp, increasing by minutes and hours
+        job_timestamp = base_timestamp.replace(hour=1, minute=i % 60, second=i % 60)
+        batch2_consistent.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
+    # Third batch - 100 jobs with increasing timestamps
+    batch3 = []
+    # First OVERLAP_SIZE jobs should match the last OVERLAP_SIZE jobs from batch2_consistent
+    for i in range(2 * PAGE_SIZE - 2 * OVERLAP_SIZE + 1, 2 * PAGE_SIZE - OVERLAP_SIZE + 1):
+        overlap_index = i - (2 * PAGE_SIZE - 2 * OVERLAP_SIZE + 1)
+        batch3.append(
+            batch2_consistent[-(OVERLAP_SIZE - overlap_index)]
+        )  # Use the same job objects for overlap
+
+    # Add the rest of batch3 with timestamps greater than batch2_last_timestamp
+    for i in range(2 * PAGE_SIZE - OVERLAP_SIZE + 1, 3 * PAGE_SIZE - 2 * OVERLAP_SIZE + 1):
+        # Each job has a unique timestamp, increasing by minutes and hours
+        job_timestamp = base_timestamp.replace(hour=2, minute=i % 60, second=i % 60)
+        batch3.append({"jobId": f"job-{i}", "updatedAt": job_timestamp})
+
+    # Collect all unique jobs that should be in the final result
+    all_jobs = []
+    all_jobs.extend(batch1_original)
+    all_jobs.extend(batch2_consistent[OVERLAP_SIZE:])  # Don't double-count overlap jobs
+    all_jobs.extend(batch3[OVERLAP_SIZE:])  # Don't double-count overlap jobs
+
+    # Setup mock responses with inconsistency and restart
+    mock_boto3_session.client().search_jobs.side_effect = [
+        {"jobs": batch1_original, "totalResults": total_jobs},
+        {"jobs": batch2_inconsistent, "totalResults": total_jobs},  # Inconsistent batch
+        {"jobs": batch1_restart, "totalResults": total_jobs},  # Restart from first batch
+        {"jobs": batch2_consistent, "totalResults": total_jobs},  # Consistent batch
+        {"jobs": batch3, "totalResults": total_jobs},
+        {"jobs": [], "totalResults": 0},  # End the loop
+    ]
+
+    # Call the function
+    result = get_jobs_updated_since_timestamp(
+        boto3_session=mock_boto3_session,
+        farm_id=MOCK_FARM_ID,
+        queue_id=MOCK_QUEUE_ID,
+        timestamp=MOCK_TIMESTAMP,
+        print_function_callback=mock_logger.echo,
+    )
+
+    # Verify results - should have all unique job IDs
+    expected_ids = {job["jobId"] for job in all_jobs}
+    assert result == expected_ids
+    assert len(result) == len(expected_ids)
+
+    # Verify that we got the expected number of jobs
+    expected_job_count = PAGE_SIZE + (PAGE_SIZE - OVERLAP_SIZE) + (PAGE_SIZE - OVERLAP_SIZE)
+    assert len(result) == expected_job_count
+
+    # Verify that none of the inconsistent job IDs are in the result
+    inconsistent_ids = {job["jobId"] for job in batch2_inconsistent}
+    assert not any(job_id in result for job_id in inconsistent_ids if job_id not in expected_ids)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Set, Callable, List
+from typing import Set, Callable, List, Dict, Any
 import boto3
 
 from deadline.client.api._session import get_default_client_config
@@ -16,6 +16,12 @@ PAGE_SIZE = 100
 OVERLAP_SIZE = 10
 
 
+class JobFetchFailure(Exception):
+    """
+    Failure fetching jobs updated since timestamp
+    """
+
+
 def get_jobs_updated_since_timestamp(
     boto3_session: boto3.Session,
     farm_id: str,
@@ -25,12 +31,13 @@ def get_jobs_updated_since_timestamp(
 ) -> Set[str]:
     """
     This function retrieves job IDs that have been updated since the last lookback time
-    using an overlapping pagination strategy with nextItemOffset to ensure consistency.
+    using a timestamp-based approach with sorting to ensure we get all jobs efficiently.
 
-    We call SearchJobs with an overlap like 0-99, 90-189, 180-279, ...
-    Then, we verify that at every 10 job overlap (configurable number OVERLAP), we have matching job ids.
-    If they do not match, it means something changed about the state of jobs in the response while we were polling.
-    We restart the polling again for an inconsistent response case.
+    The function sorts jobs by increasing updatedAt timestamp, so each search_jobs query gets
+    the oldest 100 jobs that are newer than the threshold timestamp. This approach leverages
+    the property that when a job is created or updated, it becomes the newest job in the queue.
+
+    We also maintain an overlap check to ensure consistency between batches.
 
     :param boto3_session: boto3.Session
     :param farm_id: farm ID
@@ -43,106 +50,112 @@ def get_jobs_updated_since_timestamp(
     print_function_callback(f"Querying for jobs in queue {queue_id} since {timestamp}")
 
     # Create a result set for the output of jobs to be returned
-    result_set = set()
+    result_set: Set[str] = set()
 
-    # Set up filters for the search - jobs updated since last lookback time
-    filter_expressions: dict = {
-        "filters": [
-            {
-                "dateTimeFilter": {
-                    "name": "UPDATED_AT",
-                    "dateTime": timestamp,
-                    "operator": "GREATER_THAN",
-                }
-            }
-        ],
-        "operator": "AND",
-    }
+    # Initialize threshold timestamp with the input timestamp
+    threshold_timestamp = timestamp
+    last_processed_timestamp = timestamp
 
-    # Collect all job IDs from all pages
-    all_job_ids: List[str] = []
+    # Initialize jobs and total_results
+    has_more_jobs = True
 
-    # Start with first page
-    item_offset = 0
-    page_number = 1
+    # Previous batch's last OVERLAP_SIZE jobs for consistency checking
+    previous_batch_overlap: List[Dict[str, Any]] = []
 
-    # Flag to track if we need to restart due to inconsistency
-    restart_needed = False
-
-    while True:
-        print_function_callback(f"Searching jobs from page {page_number}, offset {item_offset}")
+    # Continue until we've processed all jobs
+    while has_more_jobs:
+        print_function_callback(f"Searching jobs updated since {threshold_timestamp}")
 
         deadline = boto3_session.client("deadline", config=get_default_client_config())
 
-        # Get jobs for the current page range
+        # Set up filters for the search - jobs updated since threshold timestamp
+        filter_expressions: dict = {
+            "filters": [
+                {
+                    "dateTimeFilter": {
+                        "name": "UPDATED_AT",
+                        "dateTime": threshold_timestamp,
+                        "operator": "GREATER_THAN",
+                    }
+                }
+            ],
+            "operator": "AND",
+        }
+
+        # Set up sorting to get jobs in ascending order of updatedAt timestamp
+        sort_expressions: list[dict] = [
+            {"fieldSort": {"name": "UPDATED_AT", "sortOrder": "ASCENDING"}}
+        ]
+
         try:
             response = deadline.search_jobs(
                 farmId=farm_id,
                 queueIds=[queue_id],
-                itemOffset=item_offset,
                 pageSize=PAGE_SIZE,
+                itemOffset=0,
                 filterExpressions=filter_expressions,
+                sortExpressions=sort_expressions,
             )
         except ClientError as exc:
             raise DeadlineOperationError(f"Failed to get Jobs from Deadline:\n{exc}") from exc
 
-        # Extract job IDs from response
-        current_page_job_ids = [job.get("jobId") for job in response.get("jobs", [])]
+        # Extract jobs from response
+        jobs = response.get("jobs", [])
+        total_results = response.get("totalResults", 0)
+
+        print_function_callback(f"Found {len(jobs)} jobs out of {total_results} total results")
 
         # If no jobs returned, we're done
-        if not current_page_job_ids:
+        if not jobs:
+            print_function_callback("No more jobs found. Search complete.")
             break
 
-        # Check for overlap consistency if not the first page and not after a restart
-        if item_offset > 0 and not restart_needed:
-            # Get job IDs from the overlapping section of the previous page
-            previous_overlap_ids = set(all_job_ids[-OVERLAP_SIZE:])
+        # Check for overlap consistency if we have previous jobs
+        if previous_batch_overlap:
+            # Get the first OVERLAP_SIZE job IDs from the current batch
+            current_batch_overlap = jobs[:OVERLAP_SIZE] if len(jobs) >= OVERLAP_SIZE else jobs
+            current_overlap_ids = {job.get("jobId") for job in current_batch_overlap}
+            previous_overlap_ids = {job.get("jobId") for job in previous_batch_overlap}
 
-            # Get job IDs from the overlapping section of the current page
-            current_overlap_ids = set(current_page_job_ids[:OVERLAP_SIZE])
-
-            # If overlap doesn't match, we need to restart from the beginning
+            # If overlap doesn't match, we need to restart from the last processed timestamp
             if previous_overlap_ids != current_overlap_ids:
                 print_function_callback(
-                    "Detected inconsistency in job pagination overlap. Restarting search."
+                    "Detected inconsistency in job pagination overlap. Restarting from last processed timestamp."
                 )
-                # Restart the search from the beginning
-                item_offset = 0
-                all_job_ids = []
-                page_number = 1
-                restart_needed = True
+                # Reset to last processed timestamp and continue
+                threshold_timestamp = last_processed_timestamp
+                previous_batch_overlap = []
                 continue
 
-        # Reset the restart flag if we've successfully processed a page after restart
-        restart_needed = False
+        # Process jobs and add to result set - add all job IDs that aren't already in the result set
+        new_jobs_count = 0
+        for job in jobs:
+            job_id = job.get("jobId")
+            if job_id and job_id not in result_set:
+                result_set.add(job_id)
+                new_jobs_count += 1
 
-        # For first page, add all job IDs
-        if item_offset == 0:
-            all_job_ids.extend(current_page_job_ids)
+        # Save the last OVERLAP_SIZE jobs for consistency checking in the next batch
+        previous_batch_overlap = jobs[-OVERLAP_SIZE:] if len(jobs) >= OVERLAP_SIZE else jobs
+
+        # Update the last processed timestamp to be the current threshold timestamp
+        # And update the threshold timestamp to the last job's updatedAt time
+        if jobs:
+            last_processed_timestamp = threshold_timestamp
+            threshold_timestamp = jobs[-1].get("updatedAt")
+
+            # Rare edge case where the updatedAt is the same for all jobs in the page
+            if last_processed_timestamp == threshold_timestamp:
+                raise JobFetchFailure(
+                    "Failure fetching jobs as updatedAt is the same for all jobs in page"
+                )
+
+            # Check if we need to continue fetching more jobs
+            # If we got fewer jobs than PAGE_SIZE, we've reached the end
+            has_more_jobs = len(jobs) >= PAGE_SIZE
         else:
-            # For subsequent pages, skip the overlapping job IDs
-            all_job_ids.extend(current_page_job_ids[OVERLAP_SIZE:])
+            has_more_jobs = False
 
-        print_function_callback(
-            f"Page {page_number}: Added {len(current_page_job_ids) if item_offset == 0 else len(current_page_job_ids) - OVERLAP_SIZE} new job IDs"
-        )
-        print_function_callback(f"Current total job IDs: {len(all_job_ids)}")
-
-        # Get the next item offset from the response
-        next_item_offset = response.get("nextItemOffset")
-
-        # If no next item offset or we've reached the end, we're done
-        if next_item_offset is None:
-            break
-
-        # Calculate the next item offset with overlap
-        item_offset = next_item_offset - OVERLAP_SIZE
-        page_number += 1
-
-    # Add all collected job IDs to the result set
-    result_set.update(all_job_ids)
-
-    print_function_callback(f"Found {len(all_job_ids)} jobs updated since {timestamp}")
-    print_function_callback(f"Total ongoing jobs: {len(result_set)}")
+    print_function_callback(f"Found {len(result_set)} jobs updated since {timestamp}")
 
     return result_set
