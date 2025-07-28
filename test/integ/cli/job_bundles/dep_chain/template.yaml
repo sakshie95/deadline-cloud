@@ -1,0 +1,264 @@
+specificationVersion: 'jobtemplate-2023-09'
+name: '{{Param.JobName}}'
+description: |
+  This is a test job for step-step dependencies with job attachments data
+  being produced in each step of the chain. This job makes assertions about
+  the data it sees, which will be wrong if the output manifest files get
+  layered in the wrong order.
+parameterDefinitions:
+- name: JobName
+  type: STRING
+  default: Step-Step Chain JA Output Test
+- name: OutputPath
+  type: PATH
+  objectType: DIRECTORY
+  dataFlow: OUT
+  default: output
+- name: JobScriptDir
+  description: Directory containing embedded scripts
+  userInterface:
+    control: HIDDEN
+  type: PATH
+  objectType: DIRECTORY
+  dataFlow: IN
+  default: scripts
+steps:
+- name: A
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'A', 'Z']
+- name: B
+  dependencies:
+  - dependsOn: A
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'B', 'Z']
+- name: C
+  dependencies:
+  - dependsOn: B
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'C', 'Z']
+- name: D
+  dependencies:
+  - dependsOn: C
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'D', 'Z']
+- name: E
+  dependencies:
+  - dependsOn: D
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'E', 'Z']
+- name: F
+  dependencies:
+  - dependsOn: E
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'F', 'Z']
+- name: G
+  dependencies:
+  - dependsOn: F
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'G', 'Z']
+- name: H
+  dependencies:
+  - dependsOn: G
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'H', 'Z']
+- name: I
+  dependencies:
+  - dependsOn: H
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'I', 'Z']
+- name: J
+  dependencies:
+  - dependsOn: I
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'J', 'Z']
+- name: K
+  dependencies:
+  - dependsOn: J
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'K', 'Z']
+- name: L
+  dependencies:
+  - dependsOn: K
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'L', 'Z']
+- name: M
+  dependencies:
+  - dependsOn: L
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'M', 'Z']
+- name: N
+  dependencies:
+  - dependsOn: M
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'N', 'Z']
+- name: O
+  dependencies:
+  - dependsOn: N
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'O', 'Z']
+- name: P
+  dependencies:
+  - dependsOn: O
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'P', 'Z']
+- name: Q
+  dependencies:
+  - dependsOn: P
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'Q', 'Z']
+- name: R
+  dependencies:
+  - dependsOn: Q
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'R', 'Z']
+- name: S
+  dependencies:
+  - dependsOn: R
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'S', 'Z']
+- name: T
+  dependencies:
+  - dependsOn: S
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'T', 'Z']
+- name: U
+  dependencies:
+  - dependsOn: T
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'U', 'Z']
+- name: V
+  dependencies:
+  - dependsOn: U
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'V', 'Z']
+- name: W
+  dependencies:
+  - dependsOn: V
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'W', 'Z']
+- name: X
+  dependencies:
+  - dependsOn: W
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'X', 'Z']
+- name: Y
+  dependencies:
+  - dependsOn: X
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'Y', 'Z']
+- name: Z
+  dependencies:
+  - dependsOn: Y
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/create_files.sh', '{{Param.OutputPath}}', 'A', 'Z', 'Z']
+- name: Verify
+  dependencies:
+  - dependsOn: A
+  - dependsOn: B
+  - dependsOn: C
+  - dependsOn: D
+  - dependsOn: E
+  - dependsOn: F
+  - dependsOn: G
+  - dependsOn: H
+  - dependsOn: I
+  - dependsOn: J
+  - dependsOn: K
+  - dependsOn: L
+  - dependsOn: M
+  - dependsOn: N
+  - dependsOn: O
+  - dependsOn: P
+  - dependsOn: Q
+  - dependsOn: R
+  - dependsOn: S
+  - dependsOn: T
+  - dependsOn: U
+  - dependsOn: V
+  - dependsOn: W
+  - dependsOn: X
+  - dependsOn: Y
+  - dependsOn: Z
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Param.JobScriptDir}}/verify.sh', '{{Param.OutputPath}}', 'A', 'Z']
