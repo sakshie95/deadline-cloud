@@ -4,38 +4,48 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
-
+import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, fields
 from io import BytesIO
-import json
 from pathlib import Path
-import sys
-import tempfile
 from threading import Lock
-from typing import Any, Callable, DefaultDict, List
+from typing import Any, Callable, DefaultDict
 from unittest.mock import MagicMock, call, patch
 
 import boto3
+import pytest
 from botocore.exceptions import BotoCoreError, ClientError, ReadTimeoutError
 from botocore.stub import Stubber
 
-import pytest
-
 import deadline
+from deadline.job_attachments.api import human_readable_file_size
 from deadline.job_attachments.asset_manifests import HashAlgorithm
 from deadline.job_attachments.asset_manifests.base_manifest import (
     BaseAssetManifest,
+)
+from deadline.job_attachments.asset_manifests.base_manifest import (
     BaseManifestPath as BaseManifestPath,
 )
+from deadline.job_attachments.asset_manifests.decode import decode_manifest
 from deadline.job_attachments.asset_manifests.v2023_03_03 import (
     ManifestPath as ManifestPathv2023_03_03,
 )
 from deadline.job_attachments.asset_manifests.versions import ManifestVersion
 from deadline.job_attachments.download import (
+    VFS_CACHE_REL_PATH_IN_SESSION,
+    VFS_LOGS_FOLDER_IN_SESSION,
+    VFS_MANIFEST_FOLDER_IN_SESSION,
+    VFS_MANIFEST_FOLDER_PERMISSIONS,
     OutputDownloader,
+    _ensure_paths_within_directory,
+    _get_asset_root_from_metadata,
+    _get_new_copy_file_path,
+    _get_tasks_manifests_keys_from_s3,
     download_file,
     download_files_from_manifests,
     download_files_in_directory,
@@ -44,16 +54,8 @@ from deadline.job_attachments.download import (
     get_job_output_paths_by_asset_root,
     get_manifest_from_s3,
     handle_existing_vfs,
-    mount_vfs_from_manifests,
     merge_asset_manifests,
-    _ensure_paths_within_directory,
-    _get_asset_root_from_metadata,
-    _get_new_copy_file_path,
-    _get_tasks_manifests_keys_from_s3,
-    VFS_CACHE_REL_PATH_IN_SESSION,
-    VFS_MANIFEST_FOLDER_IN_SESSION,
-    VFS_MANIFEST_FOLDER_PERMISSIONS,
-    VFS_LOGS_FOLDER_IN_SESSION,
+    mount_vfs_from_manifests,
 )
 from deadline.job_attachments.exceptions import (
     AssetSyncError,
@@ -70,22 +72,19 @@ from deadline.job_attachments.models import (
     ManifestPathGroup,
     Queue,
 )
-from deadline.job_attachments.progress_tracker import (
-    DownloadSummaryStatistics,
-    ProgressReportMetadata,
-    ProgressStatus,
-)
-from deadline.job_attachments.asset_manifests.decode import decode_manifest
-
 from deadline.job_attachments.os_file_permission import (
     PosixFileSystemPermissionSettings,
     WindowsFileSystemPermissionSettings,
     WindowsPermissionEnum,
 )
-from deadline.job_attachments.api import human_readable_file_size
+from deadline.job_attachments.progress_tracker import (
+    DownloadSummaryStatistics,
+    ProgressReportMetadata,
+    ProgressStatus,
+)
 
-from .conftest import has_posix_target_user, has_posix_disjoint_user
 from ..conftest import is_windows_non_admin
+from .conftest import has_posix_disjoint_user, has_posix_target_user
 
 
 @dataclass
@@ -94,7 +93,7 @@ class Manifest:
     manifests: bytes
 
 
-MANIFESTS_v2022_03_03: List[Manifest] = [
+MANIFESTS_v2022_03_03: list[Manifest] = [
     Manifest(
         "job-1/step-1/task-1-1/session-action-9/manifest1v2023-03-03_output",
         b'{"hashAlg":"xxh128","manifestVersion":"2023-03-03",'
@@ -160,11 +159,11 @@ MANIFESTS_v2022_03_03: List[Manifest] = [
     ),
 ]
 
-MANIFEST_VERSION_TO_MANIFESTS: dict[ManifestVersion, List[Manifest]] = {
+MANIFEST_VERSION_TO_MANIFESTS: dict[ManifestVersion, list[Manifest]] = {
     ManifestVersion.v2023_03_03: MANIFESTS_v2022_03_03,
 }
 
-INPUT_ASSET_MANIFESTS_V2023_03_03: List[Manifest] = [
+INPUT_ASSET_MANIFESTS_V2023_03_03: list[Manifest] = [
     Manifest(
         "Inputs/0000/manifest_input",
         b'{"hashAlg":"xxh128","manifestVersion":"2023-03-03",'
@@ -178,7 +177,7 @@ INPUT_ASSET_MANIFESTS_V2023_03_03: List[Manifest] = [
     ),
 ]
 
-MANIFEST_VERSION_TO_INPUT_ASSET_MANIFESTS: dict[ManifestVersion, List[Manifest]] = {
+MANIFEST_VERSION_TO_INPUT_ASSET_MANIFESTS: dict[ManifestVersion, list[Manifest]] = {
     ManifestVersion.v2023_03_03: INPUT_ASSET_MANIFESTS_V2023_03_03,
 }
 
@@ -188,7 +187,7 @@ def assert_download_task_output(
     farm_id,
     queue_id,
     tmp_path: Path,
-    expected_files: dict[str, List[Path]],
+    expected_files: dict[str, list[Path]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -238,7 +237,7 @@ def assert_download_step_output(
     farm_id,
     queue_id,
     tmp_path: Path,
-    expected_files: dict[str, List[Path]],
+    expected_files: dict[str, list[Path]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -282,7 +281,7 @@ def assert_download_job_output(
     farm_id,
     queue_id,
     tmp_path: Path,
-    expected_files: dict[str, List[Path]],
+    expected_files: dict[str, list[Path]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -328,7 +327,7 @@ def assert_download_files_in_directory(
     queue_id: str,
     directory_path: str,
     tmp_path: Path,
-    expected_files: dict[str, List[Path]],
+    expected_files: dict[str, list[Path]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -372,7 +371,7 @@ def check_expected_files_present(expected_files, tmp_path):
 def assert_progress_tracker_values(
     manifest_version: ManifestVersion,
     summary_statistics: DownloadSummaryStatistics,
-    expected_files: dict[str, List[Path]],
+    expected_files: dict[str, list[Path]],
     expected_total_bytes: int,
     mock_on_downloading_files: MagicMock,
 ):
@@ -451,7 +450,7 @@ def assert_download_job_output_with_task_id_and_no_step_id_throws_error(
 def assert_get_job_input_paths_by_asset_root(
     s3_settings: JobAttachmentS3Settings,
     attachments: Attachments,
-    expected_files: dict[str, List[BaseManifestPath]],
+    expected_files: dict[str, list[BaseManifestPath]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -491,7 +490,7 @@ def assert_get_job_output_paths_by_asset_root(
     s3_settings: JobAttachmentS3Settings,
     farm_id: str,
     queue_id: str,
-    expected_files: dict[str, List[BaseManifestPath]],
+    expected_files: dict[str, list[BaseManifestPath]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -537,7 +536,7 @@ def assert_get_job_input_output_paths_by_asset_root(
     attachments: Attachments,
     farm_id: str,
     queue_id: str,
-    expected_files: dict[str, List[BaseManifestPath]],
+    expected_files: dict[str, list[BaseManifestPath]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -983,8 +982,8 @@ class TestFullDownload:
         Tests whether the file system ownership and permissions of the downloaded files
         are correctly changed on Windows environment.
         """
-        import win32security
         import ntsecuritycon
+        import win32security
 
         # Creates some files in the root directory that were not downloaded by Job Attachment.
         Path(tmp_path / "inputs/subdir/subdir2").mkdir(parents=True, exist_ok=True)
@@ -1810,7 +1809,7 @@ class TestFullDownload:
                 "HTTP Status Code: 403, Forbidden or Access denied. "
             ) in str(exc.value)
             failed_file_path = Path("/home/username/assets/inputs/input1.txt")
-            assert (f"(Failed to download the file to {str(failed_file_path)})") in str(exc.value)
+            assert (f"(Failed to download the file to {failed_file_path!s})") in str(exc.value)
             mock_lock.assert_not_called()
             mock_collision_dict.assert_not_called()
 
@@ -2058,6 +2057,207 @@ class TestFullDownload:
         assert str(exc.value) == expected_message
         mock_lock.assert_not_called()
         mock_collision_dict.assert_not_called()
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="This test is for Windows long path handling only.",
+    )
+    def test_download_file_create_copy_becomes_long_path_windows(self):
+        """
+        Test that when CREATE_COPY conflict resolution creates a filename that becomes a Windows long path,
+        download_file converts it to use the UNC prefix (\\?\\) format and successfully downloads the file.
+        """
+        # Create a path that's just under the Windows limit, but becomes long with " (1)"
+        base_dir = "C:\\" + "a" * 100  # Directory part
+        long_base_name = "b" * 141     # Filename part - calculated to hit threshold
+
+        original_file = Path(base_dir) / f"{long_base_name}.txt"
+        copy_file = Path(base_dir) / f"{long_base_name} (1).txt"
+
+        # Windows limit check: len(path) + 9 >= 260, so we want:
+        # - Original: len(path) + 9 < 260 (not long)
+        # - Copy: len(path + " (1)") + 9 >= 260 (becomes long)
+        original_len = len(str(original_file)) + 9
+        copy_len = len(str(copy_file)) + 9
+        assert original_len < 260, f"Original should NOT be long path: {original_len}"
+        assert copy_len >= 260, f"Copy should become long path: {copy_len}"
+
+        # Create test file path object for the manifest
+        file_path = ManifestPathv2023_03_03(
+            path=f"{long_base_name}.txt", hash="testhash", size=1, mtime=1234000000
+        )
+
+        # Mock S3 operations to simulate successful download
+        mock_s3_client = MagicMock()
+        mock_future = MagicMock()
+        mock_transfer_manager = MagicMock()
+        mock_transfer_manager.download.return_value = mock_future
+        mock_future.result.return_value = None  # Successful download
+
+        mock_lock = MagicMock()
+        mock_collision_dict = DefaultDict(int)
+
+        mock_transfer_manager.download.return_value = mock_future
+
+        with patch(
+            f"{deadline.__package__}.job_attachments.download.get_s3_client",
+            return_value=mock_s3_client,
+        ), patch(
+            f"{deadline.__package__}.job_attachments.download.get_s3_transfer_manager",
+            return_value=mock_transfer_manager,
+        ), patch(
+            f"{deadline.__package__}.job_attachments.download.get_account_id",
+            return_value="123456789012",
+        ), patch(
+            f"{deadline.__package__}.job_attachments._utils._is_windows_long_path_registry_enabled",
+            return_value=False,  # Ensure UNC prefix is used
+        ), patch(
+            "pathlib.Path.is_file",
+            return_value=True  # Simulate that original file exists to force conflict
+        ), patch(
+            f"{deadline.__package__}.job_attachments.download._get_new_copy_file_path",
+            return_value=Path(base_dir) / f"{long_base_name} (1).txt"  # Return the copy path directly
+        ), patch(
+            "pathlib.Path.mkdir"  # Mock mkdir to avoid long path directory creation issues
+        ), patch("os.utime"):  # Skip file timestamp setting
+
+            # Call download_file with CREATE_COPY resolution
+            download_file(
+                file_path,
+                HashAlgorithm.XXH128,
+                base_dir,  # Use our base directory path
+                mock_lock,
+                mock_collision_dict,
+                "test-bucket",
+                "rootPrefix/Data",
+                mock_s3_client,
+                file_conflict_resolution=FileConflictResolution.CREATE_COPY,
+            )
+
+            # Verify the download was called and file was created
+            download_calls = mock_transfer_manager.download.call_args_list
+            assert len(download_calls) == 1, "Should have made exactly one download call"
+
+            download_call = download_calls[0]
+            # Get fileobj from positional args or kwargs
+            if len(download_call.args) >= 3:
+                fileobj_path = download_call.args[2]  # fileobj is 3rd positional arg
+            else:
+                fileobj_path = download_call.kwargs.get('fileobj', '')
+
+            # The key assertion: verify the copy file path was converted to UNC format
+            assert fileobj_path.startswith("\\\\?\\"), \
+                f"Copy file path should use UNC prefix for long paths, got: {fileobj_path}"
+
+            # Verify it contains the copy filename pattern
+            assert f"{long_base_name} (1).txt" in fileobj_path, \
+                "Should contain the copy filename pattern"
+
+            # Verify the underlying path length that triggered the conversion
+            underlying_path = fileobj_path.replace("\\\\?\\", "")
+            assert len(underlying_path) + 9 >= 260, \
+                f"The underlying path + temp chars should be at/over Windows limit: {len(underlying_path) + 9}"
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="This test is for POSIX systems.",
+    )
+    def test_download_file_create_copy_long_path_posix(self):
+        """
+        Test that CREATE_COPY conflict resolution works correctly on POSIX systems
+        with long filenames and actually downloads the file.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+
+            # Create a path that's just under the Posix limit, but becomes long with " (1)"
+            nested_dir = tmp_path / ("longdir" * 14)
+            nested_dir.mkdir(parents=True, exist_ok=True)
+
+            # Use a filename length that will hit the threshold
+            long_base_name = "a" * 85  # Simple fixed length
+
+            original_file = nested_dir / f"{long_base_name}.txt"
+            copy_file = nested_dir / f"{long_base_name} (1).txt"
+
+            # This is not posix limit but we're only checking if the windows limit is exceeded nothing is done for posix
+            original_len = len(str(original_file)) + 9
+            copy_len = len(str(copy_file)) + 9
+            assert original_len < 260, f"Original should NOT be long path: {original_len}"
+            assert copy_len >= 260, f"Copy should become long path: {copy_len}"
+
+            # Create the original file to force a conflict
+            original_file.write_text("original content")
+
+            # Create test file path object for the manifest
+            file_path = ManifestPathv2023_03_03(
+                path=f"{long_base_name}.txt", hash="testhash", size=1, mtime=1234000000
+            )
+
+            # Mock S3 operations to simulate successful download
+            mock_s3_client = MagicMock()
+            mock_future = MagicMock()
+            mock_transfer_manager = MagicMock()
+            mock_transfer_manager.download.return_value = mock_future
+            mock_future.result.return_value = None  # Successful download
+
+            mock_lock = MagicMock()
+            mock_collision_dict = DefaultDict(int)
+
+            mock_transfer_manager.download.return_value = mock_future
+
+            with patch(
+                f"{deadline.__package__}.job_attachments.download.get_s3_client",
+                return_value=mock_s3_client,
+            ), patch(
+                f"{deadline.__package__}.job_attachments.download.get_s3_transfer_manager",
+                return_value=mock_transfer_manager,
+            ), patch(
+                f"{deadline.__package__}.job_attachments.download.get_account_id",
+                return_value="123456789012",
+            ), patch(
+                f"{deadline.__package__}.job_attachments.download._get_new_copy_file_path",
+                return_value=nested_dir / f"{long_base_name} (1).txt"  # Return the copy path directly
+            ), patch(
+                "pathlib.Path.mkdir"  # Mock mkdir to avoid any directory creation issues
+            ), patch("os.utime"):  # Skip file timestamp setting
+
+                # Call download_file with CREATE_COPY resolution
+                download_file(
+                    file_path,
+                    HashAlgorithm.XXH128,
+                    str(nested_dir),  # Use the nested directory
+                    mock_lock,
+                    mock_collision_dict,
+                    "test-bucket",
+                    "rootPrefix/Data",
+                    mock_s3_client,
+                    file_conflict_resolution=FileConflictResolution.CREATE_COPY,
+                )
+
+                # Verify the download was called and file was created
+                download_calls = mock_transfer_manager.download.call_args_list
+                assert len(download_calls) == 1, "Should have made exactly one download call"
+
+                download_call = download_calls[0]
+                # Get fileobj from positional args or kwargs
+                if len(download_call.args) >= 3:
+                    fileobj_path = download_call.args[2]  # fileobj is 3rd positional arg
+                else:
+                    fileobj_path = download_call.kwargs.get('fileobj', '')
+
+                # On POSIX: verify no UNC prefix is used (should be normal path)
+                assert not fileobj_path.startswith("\\\\?\\"), \
+                    f"POSIX systems should not use UNC prefix, got: {fileobj_path}"
+
+                # Verify it contains the copy filename pattern
+                assert f"{long_base_name} (1).txt" in fileobj_path, \
+                    "Should contain the copy filename pattern"
+
+                # Verify the path is the expected copy path
+                expected_copy_path = str(nested_dir / f"{long_base_name} (1).txt")
+                assert fileobj_path == expected_copy_path, \
+                    f"Should use normal path format on POSIX: expected {expected_copy_path}, got {fileobj_path}"
 
 
 @pytest.mark.parametrize("manifest_version", [ManifestVersion.v2023_03_03])

@@ -15,51 +15,44 @@ from itertools import chain
 from logging import Logger, LoggerAdapter, getLogger
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Callable, DefaultDict, List, Optional, Tuple, Union
+from threading import Lock
+from typing import Any, Callable, DefaultDict, Optional, Union
 
 import boto3
 from boto3.s3.transfer import ProgressCallbackInvoker
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
 
-from .asset_manifests.base_manifest import BaseAssetManifest, BaseManifestPath as RelativeFilePath
-from .asset_manifests.hash_algorithms import HashAlgorithm
-from .asset_manifests.decode import decode_manifest
-from .exceptions import (
-    COMMON_ERROR_GUIDANCE_FOR_S3,
-    AssetSyncError,
-    AssetSyncCancelledError,
-    JobAttachmentS3BotoCoreError,
-    JobAttachmentsS3ClientError,
-    PathOutsideDirectoryError,
-    JobAttachmentsError,
-    MissingAssetRootError,
-)
-from .vfs import (
-    VFSProcessManager,
-    VFS_CACHE_REL_PATH_IN_SESSION,
-    VFS_MANIFEST_FOLDER_IN_SESSION,
-    VFS_LOGS_FOLDER_IN_SESSION,
-    VFS_MANIFEST_FOLDER_PERMISSIONS,
-)
-
-from .models import (
-    Attachments,
-    FileConflictResolution,
-    JobAttachmentS3Settings,
-    ManifestPathGroup,
-)
-from .progress_tracker import (
-    DownloadSummaryStatistics,
-    ProgressReportMetadata,
-    ProgressStatus,
-    ProgressTracker,
-)
 from ._aws.aws_clients import (
     get_account_id,
     get_s3_client,
     get_s3_max_pool_connections,
     get_s3_transfer_manager,
+)
+from ._utils import (
+    _get_long_path_compatible_path,
+    _is_relative_to,
+    _join_s3_paths,
+)
+from .asset_manifests.base_manifest import BaseAssetManifest
+from .asset_manifests.base_manifest import BaseManifestPath as RelativeFilePath
+from .asset_manifests.decode import decode_manifest
+from .asset_manifests.hash_algorithms import HashAlgorithm
+from .exceptions import (
+    COMMON_ERROR_GUIDANCE_FOR_S3,
+    AssetSyncCancelledError,
+    AssetSyncError,
+    JobAttachmentS3BotoCoreError,
+    JobAttachmentsError,
+    JobAttachmentsS3ClientError,
+    MissingAssetRootError,
+    PathOutsideDirectoryError,
+)
+from .models import (
+    Attachments,
+    FileConflictResolution,
+    JobAttachmentS3Settings,
+    ManifestPathGroup,
 )
 from .os_file_permission import (
     FileSystemPermissionSettings,
@@ -68,12 +61,19 @@ from .os_file_permission import (
     _set_fs_group_for_posix,
     _set_fs_permission_for_windows,
 )
-from ._utils import (
-    _get_long_path_compatible_path,
-    _is_relative_to,
-    _join_s3_paths,
+from .progress_tracker import (
+    DownloadSummaryStatistics,
+    ProgressReportMetadata,
+    ProgressStatus,
+    ProgressTracker,
 )
-from threading import Lock
+from .vfs import (
+    VFS_CACHE_REL_PATH_IN_SESSION,
+    VFS_LOGS_FOLDER_IN_SESSION,
+    VFS_MANIFEST_FOLDER_IN_SESSION,
+    VFS_MANIFEST_FOLDER_PERMISSIONS,
+    VFSProcessManager,
+)
 
 download_logger = getLogger("deadline.job_attachments.download")
 
@@ -91,7 +91,7 @@ def get_manifest_from_s3(
 
 def get_asset_root_and_manifest_from_s3(
     manifest_key: str, s3_bucket: str, session: Optional[boto3.Session] = None
-) -> Tuple[Optional[str], BaseAssetManifest]:
+) -> tuple[Optional[str], BaseAssetManifest]:
     s3_client = get_s3_client(session=session)
     try:
         # Assumption: the manifest is less than 5GB. S3 objects larger than 5GB will be truncated.
@@ -130,7 +130,7 @@ def get_asset_root_and_manifest_from_s3(
             status_code=status_code,
             bucket_name=s3_bucket,
             key_or_prefix=manifest_key,
-            message=f"{status_code_guidance.get(status_code, '')} {str(exc)}",
+            message=f"{status_code_guidance.get(status_code, '')} {exc!s}",
         ) from exc
     except BotoCoreError as bce:
         raise JobAttachmentS3BotoCoreError(
@@ -188,12 +188,12 @@ def _get_output_manifest_prefix(
 
 def _get_tasks_manifests_keys_from_s3(
     manifest_prefix: str, s3_bucket: str, session: Optional[boto3.Session] = None
-) -> List[str]:
+) -> list[str]:
     """
     Returns the keys of all output manifests from the given s3 prefix.
     (Only the manifests that end with the prefix pattern task-*/*_output)
     """
-    manifests_keys: List[str] = []
+    manifests_keys: list[str] = []
     s3_client = get_s3_client(session=session)
     try:
         paginator = s3_client.get_paginator("list_objects_v2")
@@ -233,7 +233,7 @@ def _get_tasks_manifests_keys_from_s3(
             status_code=status_code,
             bucket_name=s3_bucket,
             key_or_prefix=manifest_prefix,
-            message=f"{status_code_guidance.get(status_code, '')} {str(exc)}",
+            message=f"{status_code_guidance.get(status_code, '')} {exc!s}",
         ) from exc
     except BotoCoreError as bce:
         raise JobAttachmentS3BotoCoreError(
@@ -436,7 +436,7 @@ def download_file(
     modified_time_override: Optional[float] = None,
     progress_tracker: Optional[ProgressTracker] = None,
     file_conflict_resolution: Optional[FileConflictResolution] = FileConflictResolution.CREATE_COPY,
-) -> Tuple[int, Optional[Path]]:
+) -> tuple[int, Optional[Path]]:
     """
     Downloads a file from the S3 bucket to the local directory. `modified_time_override` is ignored if the manifest
     version used supports timestamps.
@@ -472,9 +472,13 @@ def download_file(
         elif file_conflict_resolution == FileConflictResolution.OVERWRITE:
             pass
         elif file_conflict_resolution == FileConflictResolution.CREATE_COPY:
-            local_file_path = _get_new_copy_file_path(
+            copy_local_file_path = _get_new_copy_file_path(
                 local_file_path, collision_lock, collision_file_dict
             )
+
+            # Re-run _get_long_path_compatible_path for updated file name after file conflict resolution
+            # _get_long_path_compatible_path is idempotent, so it doesn't re-process an existing long path
+            local_file_path = _get_long_path_compatible_path(copy_local_file_path)
         else:
             raise ValueError(
                 f"Unknown choice for file conflict resolution: {file_conflict_resolution}"
@@ -536,7 +540,7 @@ def download_file(
                 status_code=status_code,
                 bucket_name=s3_bucket,
                 key_or_prefix=s3_key,
-                message=f"{status_code_guidance.get(status_code, '')} {str(exc)} (Failed to download the file to {str(local_file_path)})",
+                message=f"{status_code_guidance.get(status_code, '')} {exc!s} (Failed to download the file to {local_file_path!s})",
             ) from exc
 
         # TODO: Temporary to prevent breaking backwards-compatibility; if file not found, try again without hash alg postfix
@@ -570,14 +574,14 @@ def download_file(
     except Exception as e:
         raise AssetSyncError(e) from e
 
-    download_logger.debug(f"Downloaded {file.path} to {str(local_file_path)}")
+    download_logger.debug(f"Downloaded {file.path} to {local_file_path!s}")
     os.utime(local_file_path, (modified_time_override, modified_time_override))  # type: ignore[arg-type]
 
     return (file_bytes, local_file_path)
 
 
 def _download_files_parallel(
-    files: List[RelativeFilePath],
+    files: list[RelativeFilePath],
     hash_algorithm: HashAlgorithm,
     num_download_workers: int,
     local_download_dir: str,
@@ -1062,7 +1066,6 @@ def _ensure_paths_within_directory(root_path: str, paths_relative_to_root: list[
             raise PathOutsideDirectoryError(
                 f"The provided path is not under the root directory: {path}"
             )
-    return
 
 
 class OutputDownloader:
