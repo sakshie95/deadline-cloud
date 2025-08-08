@@ -465,7 +465,10 @@ def assert_get_job_input_paths_by_asset_root(
                 files_by_hash_alg={
                     HashAlgorithm.XXH128: [
                         ManifestPathv2023_03_03(
-                            path="outputs/output.txt", hash="outputhash", size=100, mtime=1234567
+                            path="outputs/output.txt",
+                            hash="outputhash",
+                            size=100,
+                            mtime=1234567,
                         )
                     ],
                 },
@@ -655,7 +658,10 @@ class TestFullDownload:
             path="inputs/subdir/input3.txt", hash="input3", size=1, mtime=1234000000
         ),
         ManifestPathv2023_03_03(
-            path="inputs/subdir/subdir2/input4.txt", hash="input4", size=1, mtime=1234000000
+            path="inputs/subdir/subdir2/input4.txt",
+            hash="input4",
+            size=1,
+            mtime=1234000000,
         ),
         ManifestPathv2023_03_03(path="inputs/input5.txt", hash="input5", size=1, mtime=1234000000),
     ]
@@ -1587,7 +1593,8 @@ class TestFullDownload:
                 task_id=None,
             )
         with patch(
-            f"{deadline.__package__}.job_attachments.download.download_files", return_value=[]
+            f"{deadline.__package__}.job_attachments.download.download_files",
+            return_value=[],
         ), pytest.raises((PathOutsideDirectoryError, ValueError)):
             output_downloader.download_job_output()
 
@@ -1669,7 +1676,8 @@ class TestFullDownload:
         )
 
         with stubber, patch(
-            f"{deadline.__package__}.job_attachments.download.get_s3_client", return_value=s3_client
+            f"{deadline.__package__}.job_attachments.download.get_s3_client",
+            return_value=s3_client,
         ):
             with pytest.raises(JobAttachmentsS3ClientError) as exc:
                 get_manifest_from_s3("test-key", "test-bucket")
@@ -1721,7 +1729,8 @@ class TestFullDownload:
         )
 
         with stubber, patch(
-            f"{deadline.__package__}.job_attachments.download.get_s3_client", return_value=s3_client
+            f"{deadline.__package__}.job_attachments.download.get_s3_client",
+            return_value=s3_client,
         ):
             with pytest.raises(JobAttachmentsS3ClientError) as exc:
                 _get_tasks_manifests_keys_from_s3(
@@ -1786,7 +1795,8 @@ class TestFullDownload:
         )
 
         with stubber, patch(
-            f"{deadline.__package__}.job_attachments.download.get_s3_client", return_value=s3_client
+            f"{deadline.__package__}.job_attachments.download.get_s3_client",
+            return_value=s3_client,
         ), patch(f"{deadline.__package__}.job_attachments.download.Path.mkdir"):
             with pytest.raises(JobAttachmentsS3ClientError) as exc:
                 download_file(
@@ -2058,29 +2068,25 @@ class TestFullDownload:
         mock_lock.assert_not_called()
         mock_collision_dict.assert_not_called()
 
-    @pytest.mark.skipif(
-        sys.platform != "win32",
-        reason="This test is for Windows long path handling only.",
-    )
-    def test_download_file_create_copy_becomes_long_path_windows(self):
+    def _test_create_copy_long_path_scenario(
+        self, base_dir, long_base_name, expect_unc_prefix=False
+    ):
         """
-        Test that when CREATE_COPY conflict resolution creates a filename that becomes a Windows long path,
-        download_file converts it to use the UNC prefix (\\?\\) format and successfully downloads the file.
+        Common test logic for CREATE_COPY long path scenarios.
+        Tests that original path is not long but copy becomes long.
         """
-        # Create a path that's just under the Windows limit, but becomes long with " (1)"
-        base_dir = "C:\\" + "a" * 100  # Directory part
-        long_base_name = "b" * 141     # Filename part - calculated to hit threshold
-
         original_file = Path(base_dir) / f"{long_base_name}.txt"
         copy_file = Path(base_dir) / f"{long_base_name} (1).txt"
 
-        # Windows limit check: len(path) + 9 >= 260, so we want:
-        # - Original: len(path) + 9 < 260 (not long)
-        # - Copy: len(path + " (1)") + 9 >= 260 (becomes long)
+        # Verify our test scenario is correct
         original_len = len(str(original_file)) + 9
         copy_len = len(str(copy_file)) + 9
         assert original_len < 260, f"Original should NOT be long path: {original_len}"
         assert copy_len >= 260, f"Copy should become long path: {copy_len}"
+
+        # Create the original file to force a conflict
+        original_file.parent.mkdir(parents=True, exist_ok=True)
+        original_file.write_text("original content")
 
         # Create test file path object for the manifest
         file_path = ManifestPathv2023_03_03(
@@ -2092,12 +2098,10 @@ class TestFullDownload:
         mock_future = MagicMock()
         mock_transfer_manager = MagicMock()
         mock_transfer_manager.download.return_value = mock_future
-        mock_future.result.return_value = None  # Successful download
+        mock_future.result.return_value = None
 
         mock_lock = MagicMock()
-        mock_collision_dict = DefaultDict(int)
-
-        mock_transfer_manager.download.return_value = mock_future
+        mock_collision_dict: DefaultDict[str, int] = DefaultDict(int)
 
         with patch(
             f"{deadline.__package__}.job_attachments.download.get_s3_client",
@@ -2110,22 +2114,19 @@ class TestFullDownload:
             return_value="123456789012",
         ), patch(
             f"{deadline.__package__}.job_attachments._utils._is_windows_long_path_registry_enabled",
-            return_value=False,  # Ensure UNC prefix is used
+            return_value=False,  # Ensure UNC prefix is used for Windows
         ), patch(
             "pathlib.Path.is_file",
-            return_value=True  # Simulate that original file exists to force conflict
+            return_value=True,  # Simulate that original file exists to force conflict
         ), patch(
             f"{deadline.__package__}.job_attachments.download._get_new_copy_file_path",
-            return_value=Path(base_dir) / f"{long_base_name} (1).txt"  # Return the copy path directly
-        ), patch(
-            "pathlib.Path.mkdir"  # Mock mkdir to avoid long path directory creation issues
-        ), patch("os.utime"):  # Skip file timestamp setting
-
+            return_value=copy_file,
+        ), patch("pathlib.Path.mkdir"), patch("os.utime"):
             # Call download_file with CREATE_COPY resolution
             download_file(
                 file_path,
                 HashAlgorithm.XXH128,
-                base_dir,  # Use our base directory path
+                str(base_dir),
                 mock_lock,
                 mock_collision_dict,
                 "test-bucket",
@@ -2134,130 +2135,86 @@ class TestFullDownload:
                 file_conflict_resolution=FileConflictResolution.CREATE_COPY,
             )
 
-            # Verify the download was called and file was created
+            # Verify the download was called
             download_calls = mock_transfer_manager.download.call_args_list
             assert len(download_calls) == 1, "Should have made exactly one download call"
 
             download_call = download_calls[0]
             # Get fileobj from positional args or kwargs
             if len(download_call.args) >= 3:
-                fileobj_path = download_call.args[2]  # fileobj is 3rd positional arg
+                fileobj_path = download_call.args[2]
             else:
-                fileobj_path = download_call.kwargs.get('fileobj', '')
+                fileobj_path = download_call.kwargs.get("fileobj", "")
 
-            # The key assertion: verify the copy file path was converted to UNC format
-            assert fileobj_path.startswith("\\\\?\\"), \
-                f"Copy file path should use UNC prefix for long paths, got: {fileobj_path}"
+            # Platform-specific path format validation
+            if expect_unc_prefix:
+                # Windows: verify UNC prefix is used
+                assert fileobj_path.startswith("\\\\?\\"), (
+                    f"Copy file path should use UNC prefix for long paths, got: {fileobj_path}"
+                )
+
+                # Verify the underlying path length that triggered the conversion
+                underlying_path = fileobj_path.replace("\\\\?\\", "")
+                assert len(underlying_path) + 9 >= 260, (
+                    f"The underlying path + temp chars should be at/over Windows limit: {len(underlying_path) + 9}"
+                )
+            else:
+                # POSIX: verify no UNC prefix is used
+                assert not fileobj_path.startswith("\\\\?\\"), (
+                    f"POSIX systems should not use UNC prefix, got: {fileobj_path}"
+                )
+
+                # Verify the path is the expected copy path
+                expected_copy_path = str(copy_file)
+                assert fileobj_path == expected_copy_path, (
+                    f"Should use normal path format on POSIX: expected {expected_copy_path}, got {fileobj_path}"
+                )
 
             # Verify it contains the copy filename pattern
-            assert f"{long_base_name} (1).txt" in fileobj_path, \
+            assert f"{long_base_name} (1).txt" in fileobj_path, (
                 "Should contain the copy filename pattern"
+            )
 
-            # Verify the underlying path length that triggered the conversion
-            underlying_path = fileobj_path.replace("\\\\?\\", "")
-            assert len(underlying_path) + 9 >= 260, \
-                f"The underlying path + temp chars should be at/over Windows limit: {len(underlying_path) + 9}"
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="This test is for Windows long path handling only.",
+    )
+    def test_download_file_create_copy_becomes_long_path_windows(self):
+        """
+        Test that when CREATE_COPY conflict resolution creates a filename that becomes a Windows long path,
+        download_file converts it to use the UNC prefix (\\?\\) format and successfully downloads the file.
+        """
+        # Create a path that's just under the Windows limit, but becomes long with " (1)"
+        base_dir = "C:\\" + "a" * 100  # Directory part
+        long_base_name = "b" * 141  # Filename part - calculated to hit threshold
+
+        # Use the common test logic with Windows-specific validation
+        self._test_create_copy_long_path_scenario(base_dir, long_base_name, expect_unc_prefix=True)
 
     @pytest.mark.skipif(
         sys.platform == "win32",
         reason="This test is for POSIX systems.",
     )
-    def test_download_file_create_copy_long_path_posix(self):
+    @pytest.mark.parametrize(
+        "dir_multiplier,filename_len",
+        [
+            (14, 85) if sys.platform == "darwin" else (22, 72),
+        ],
+    )
+    def test_download_file_create_copy_long_path_posix(self, dir_multiplier, filename_len):
         """
         Test that CREATE_COPY conflict resolution works correctly on POSIX systems
         with long filenames and actually downloads the file.
         """
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
+            nested_dir = tmp_path / ("longdir" * dir_multiplier)
+            long_base_name = "a" * filename_len
 
-            # Create a path that's just under the Posix limit, but becomes long with " (1)"
-            nested_dir = tmp_path / ("longdir" * 14)
-            nested_dir.mkdir(parents=True, exist_ok=True)
-
-            # Use a filename length that will hit the threshold
-            long_base_name = "a" * 85  # Simple fixed length
-
-            original_file = nested_dir / f"{long_base_name}.txt"
-            copy_file = nested_dir / f"{long_base_name} (1).txt"
-
-            # This is not posix limit but we're only checking if the windows limit is exceeded nothing is done for posix
-            original_len = len(str(original_file)) + 9
-            copy_len = len(str(copy_file)) + 9
-            assert original_len < 260, f"Original should NOT be long path: {original_len}"
-            assert copy_len >= 260, f"Copy should become long path: {copy_len}"
-
-            # Create the original file to force a conflict
-            original_file.write_text("original content")
-
-            # Create test file path object for the manifest
-            file_path = ManifestPathv2023_03_03(
-                path=f"{long_base_name}.txt", hash="testhash", size=1, mtime=1234000000
+            # Use the common test logic with POSIX-specific validation
+            self._test_create_copy_long_path_scenario(
+                nested_dir, long_base_name, expect_unc_prefix=False
             )
-
-            # Mock S3 operations to simulate successful download
-            mock_s3_client = MagicMock()
-            mock_future = MagicMock()
-            mock_transfer_manager = MagicMock()
-            mock_transfer_manager.download.return_value = mock_future
-            mock_future.result.return_value = None  # Successful download
-
-            mock_lock = MagicMock()
-            mock_collision_dict = DefaultDict(int)
-
-            mock_transfer_manager.download.return_value = mock_future
-
-            with patch(
-                f"{deadline.__package__}.job_attachments.download.get_s3_client",
-                return_value=mock_s3_client,
-            ), patch(
-                f"{deadline.__package__}.job_attachments.download.get_s3_transfer_manager",
-                return_value=mock_transfer_manager,
-            ), patch(
-                f"{deadline.__package__}.job_attachments.download.get_account_id",
-                return_value="123456789012",
-            ), patch(
-                f"{deadline.__package__}.job_attachments.download._get_new_copy_file_path",
-                return_value=nested_dir / f"{long_base_name} (1).txt"  # Return the copy path directly
-            ), patch(
-                "pathlib.Path.mkdir"  # Mock mkdir to avoid any directory creation issues
-            ), patch("os.utime"):  # Skip file timestamp setting
-
-                # Call download_file with CREATE_COPY resolution
-                download_file(
-                    file_path,
-                    HashAlgorithm.XXH128,
-                    str(nested_dir),  # Use the nested directory
-                    mock_lock,
-                    mock_collision_dict,
-                    "test-bucket",
-                    "rootPrefix/Data",
-                    mock_s3_client,
-                    file_conflict_resolution=FileConflictResolution.CREATE_COPY,
-                )
-
-                # Verify the download was called and file was created
-                download_calls = mock_transfer_manager.download.call_args_list
-                assert len(download_calls) == 1, "Should have made exactly one download call"
-
-                download_call = download_calls[0]
-                # Get fileobj from positional args or kwargs
-                if len(download_call.args) >= 3:
-                    fileobj_path = download_call.args[2]  # fileobj is 3rd positional arg
-                else:
-                    fileobj_path = download_call.kwargs.get('fileobj', '')
-
-                # On POSIX: verify no UNC prefix is used (should be normal path)
-                assert not fileobj_path.startswith("\\\\?\\"), \
-                    f"POSIX systems should not use UNC prefix, got: {fileobj_path}"
-
-                # Verify it contains the copy filename pattern
-                assert f"{long_base_name} (1).txt" in fileobj_path, \
-                    "Should contain the copy filename pattern"
-
-                # Verify the path is the expected copy path
-                expected_copy_path = str(nested_dir / f"{long_base_name} (1).txt")
-                assert fileobj_path == expected_copy_path, \
-                    f"Should use normal path format on POSIX: expected {expected_copy_path}, got {fileobj_path}"
 
 
 @pytest.mark.parametrize("manifest_version", [ManifestVersion.v2023_03_03])
@@ -2544,7 +2501,8 @@ def test_download_files_from_manifests(
         return (40, Path(args[0].path))
 
     with patch(
-        f"{deadline.__package__}.job_attachments.download.download_file", side_effect=download_file
+        f"{deadline.__package__}.job_attachments.download.download_file",
+        side_effect=download_file,
     ), patch(f"{deadline.__package__}.job_attachments.download.get_s3_client"):
         download_files_from_manifests(
             s3_bucket="s3_settings.s3BucketName",
@@ -2690,7 +2648,10 @@ def test_mount_vfs_from_manifests(
         )
 
         mock_write_manifest.assert_has_calls(
-            [call(merged_decoded, dir=manifest_path), call(merged_decoded, dir=manifest_path)]
+            [
+                call(merged_decoded, dir=manifest_path),
+                call(merged_decoded, dir=manifest_path),
+            ]
         )
         mock_vfs_start.assert_has_calls(
             [call(session_dir=temp_dir_path), call(session_dir=temp_dir_path)]
