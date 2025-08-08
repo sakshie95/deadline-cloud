@@ -123,6 +123,12 @@ def _interactive_confirmation_prompt(message: str, default_response: bool) -> bo
     help="The max worker count of the job.",
 )
 @click.option(
+    "--target-task-run-status",
+    type=click.Choice(["READY", "SUSPENDED"], case_sensitive=False),
+    help="The target task run status for the job. READY means tasks will start immediately, "
+    "SUSPENDED means tasks will be created but not start until manually resumed.",
+)
+@click.option(
     "--job-attachments-file-system",
     help="The method workers use to access job attachments. "
     "COPIED means to copy files to the worker and VIRTUAL means to load "
@@ -163,6 +169,7 @@ def bundle_submit(
     max_failed_tasks_count,
     max_retries_per_task,
     max_worker_count,
+    target_task_run_status,
     require_paths_exist,
     submitter_name,
     **args,
@@ -190,6 +197,7 @@ def bundle_submit(
             max_failed_tasks_count=max_failed_tasks_count,
             max_retries_per_task=max_retries_per_task,
             max_worker_count=max_worker_count,
+            target_task_run_status=target_task_run_status,
             hashing_progress_callback=hash_callback_manager.callback,
             upload_progress_callback=upload_callback_manager.callback,
             create_job_result_callback=_check_create_job_wait_canceled,
@@ -310,28 +318,22 @@ def bundle_gui_submit(
 
         app.exec()
 
-        response = None
-        if submitter:
-            response = submitter.create_job_response
-
         _print_response(
             output=output,
-            submitted=True if response else False,
             job_bundle_dir=job_bundle_dir,
             job_history_bundle_dir=submitter.job_history_bundle_dir,
-            job_id=response["jobId"] if response else None,
+            job_id=submitter.job_id,
         )
 
 
 def _print_response(
     output: str,
-    submitted: bool,
     job_bundle_dir: str,
     job_history_bundle_dir: Optional[str],
     job_id: Optional[str],
 ):
     if output == "json":
-        if submitted:
+        if job_id:
             response: dict[str, Any] = {
                 "status": "SUBMITTED",
                 "jobId": job_id,
@@ -341,7 +343,7 @@ def _print_response(
         else:
             click.echo(json.dumps({"status": "CANCELED"}))
     else:
-        if submitted:
+        if job_id:
             click.echo("Submitted job bundle:")
             click.echo(f"   {job_bundle_dir}")
             click.echo(f"Job ID: {job_id}")

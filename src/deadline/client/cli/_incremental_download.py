@@ -5,19 +5,51 @@ __all__ = ["_incremental_output_download"]
 
 from datetime import datetime, timedelta, timezone
 import difflib
-import textwrap
 from typing import Optional
+from configparser import ConfigParser
+from typing import Any, Callable
+import sys
+import time
+import concurrent.futures
+import textwrap
 
 from .. import api
-from typing import Any, Callable
 import boto3
+from botocore.client import BaseClient  # type: ignore[import]
+from ..exceptions import DeadlineOperationError
 from ..api._list_jobs_by_filter_expression import _list_jobs_by_filter_expression
-from ...job_attachments.incremental_downloads.incremental_download_state import (
+from ...common.path_utils import summarize_path_list, human_readable_file_size
+from ...job_attachments._incremental_downloads.incremental_download_state import (
     IncrementalDownloadState,
     IncrementalDownloadJob,
     _datetimes_to_str,
 )
-from ._common import _cli_object_repr
+from ...job_attachments._incremental_downloads._manifest_s3_downloads import (
+    _add_output_manifests_from_s3,
+    _download_all_manifests_with_absolute_paths,
+    _merge_absolute_path_manifest_list,
+    _download_manifest_paths,
+)
+from ...job_attachments._path_mapping import _generate_path_mapping_rules, _PathMappingRuleApplier
+from ...job_attachments.asset_manifests import (
+    BaseAssetManifest,
+    BaseManifestPath,
+)
+from ...job_attachments.asset_manifests import (
+    HashAlgorithm,
+)
+from ...job_attachments.models import (
+    FileConflictResolution,
+    PathFormat,
+    StorageProfileOperatingSystemFamily,
+)
+from ...job_attachments.progress_tracker import (
+    ProgressReportMetadata,
+)
+from ._common import _cli_object_repr, sigint_handler
+
+
+SESSIONS_API_MAX_CONCURRENCY = 3
 
 
 def _get_download_candidate_jobs(
@@ -33,10 +65,11 @@ def _get_download_candidate_jobs(
     the provided starting_timestamp.
 
     Args:
-        boto3_session: The boto3 session for calling AWS APIs.
-        farm_id: The farm ID.
-        queue_id: The queue ID in the farm.
+        boto3_session: The boto3.Session for accessing AWS.
+        farm_id: The farm id for the operation.
+        queue_id: The queue id for the operation.
         starting_timestamp: The point in time from which to look for new download outputs.
+        print_function_callback: Callback for printing output to the terminal or log.
 
     Returns:
         A dictionary mapping job id to the job as returned by the deadline.search_jobs API.
@@ -105,32 +138,6 @@ def _get_download_candidate_jobs(
     # - Any recently ended job (job went from active to terminal with a taskRunStatus
     #   in SUSPENDED, CANCELED, FAILED, SUCCEEDED, NOT_COMPATIBLE), that has at least
     #   one SUCCEEDED task. The endedAt timestamp field gets updated when that occurs.
-    # TODO: Enable this when filtering by ENDED_AT works.
-    # download_candidate_jobs.update(
-    #     {
-    #         job["jobId"]: job
-    #         for job in _list_jobs_by_filter_expression(
-    #             boto3_session,
-    #             farm_id,
-    #             queue_id,
-    #             filter_expression={
-    #                 "filters": [
-    #                     {
-    #                         "dateTimeFilter": {
-    #                             "name": "ENDED_AT",
-    #                             "dateTime": starting_timestamp,
-    #                             "operator": "GREATER_THAN_EQUAL_TO",
-    #                         }
-    #                     }
-    #                 ],
-    #                 "operator": "AND",
-    #             },
-    #         )
-    #     }
-    # )
-    # WORKAROUND: Get all jobs with a SUCCEEDED, SUSPENDED, or FAILED task run status, and filter by endedAt client-side.
-    #             We want to download all parts of these jobs that succeeded, even when the whole did not.
-    #             We do not download anything more for a job that was CANCELED or is NOT_COMPATIBLE.
     recently_ended_jobs = _list_jobs_by_filter_expression(
         boto3_session,
         farm_id,
@@ -138,34 +145,24 @@ def _get_download_candidate_jobs(
         filter_expression={
             "filters": [
                 {
-                    "stringFilter": {
-                        "name": "TASK_RUN_STATUS",
-                        "operator": "EQUAL",
-                        "value": status_value,
-                    },
+                    "dateTimeFilter": {
+                        "name": "ENDED_AT",
+                        "dateTime": starting_timestamp,
+                        "operator": "GREATER_THAN_EQUAL_TO",
+                    }
                 }
-                for status_value in ["SUCCEEDED", "SUSPENDED", "FAILED"]
             ],
-            "operator": "OR",
+            "operator": "AND",
         },
     )
-    print(f"DEBUG: Got {len(recently_ended_jobs)} succeeded/suspended jobs")
-    print(f"DEBUG: Filtering to job[endedAt] >= {starting_timestamp.astimezone().isoformat()}")
-    # Jobs that are submitted with a SUSPENDED status will have no "endedAt" field
-    # Filter to jobs that:
-    # 1. Have an endedAt field. (jobs submitted as SUSPENDED will not have one)
-    # 2. Timestamp endedAt is after the timestamp threshold.
-    # 3. The count of SUCCEEDED tasks is positive.
-    recently_ended_jobs = [
-        job
-        for job in recently_ended_jobs
-        if "endedAt" in job
-        and job["endedAt"] >= starting_timestamp
-        and job["taskRunStatusCounts"]["SUCCEEDED"] > 0
-    ]
     print(
-        f"DEBUG: Filtered down to {len(recently_ended_jobs)} succeeded/suspended jobs based on endedAt timestamp threshold and SUCCEEDED task filter"
+        f"DEBUG: Got {len(recently_ended_jobs)} jobs with job[endedAt] >= {starting_timestamp.astimezone().isoformat()}"
     )
+    # Filter to jobs where the count of SUCCEEDED tasks is positive.
+    recently_ended_jobs = [
+        job for job in recently_ended_jobs if job["taskRunStatusCounts"]["SUCCEEDED"] > 0
+    ]
+    print(f"DEBUG: Filtered down to {len(recently_ended_jobs)} jobs based on SUCCEEDED task filter")
     download_candidate_jobs.update(
         {job["jobId"]: _datetimes_to_str(job) for job in recently_ended_jobs}
     )
@@ -180,14 +177,28 @@ class CategorizedJobIds:
     """
     Takes jobs loaded from a loaded checkpoint and a query to get download candidate jobs,
     analyzes all the jobs by looking at fields like task run status counds to categorize them.
+
+    Job categories:
+        added: The job was created or requeued so it now can produce new downloads.
+        updated: The job changed since the previous incremental download operation.
+        unchanged: The job did not change since the previous incremental download operation.
+        completed: The job finished running so all output is available for download.
+        inactive: The job can no longer have any new downloads unless it is requeued. Minimal
+            metadata is tracked to detect if it is requeued.
+        missing_storage_profile: The job has no storage profile, but the operation requires one.
+            If incremental download was called with local_storage_profile_id=None, this set
+            will always be empty.
+        attachments_free: The job has no job attachments associated that can produce
+            outputs for download.
     """
 
-    inactive: set[str] = set()
-    updated: set[str] = set()
     added: set[str] = set()
+    updated: set[str] = set()
     unchanged: set[str] = set()
-    attachments_free: set[str] = set()
     completed: set[str] = set()
+    inactive: set[str] = set()
+    missing_storage_profile: set[str] = set()
+    attachments_free: set[str] = set()
 
 
 def _categorize_jobs_in_checkpoint(
@@ -203,7 +214,18 @@ def _categorize_jobs_in_checkpoint(
     Categorizes the provided download candidate jobs by id into a CategorizedJobIds object,
     updating the jobs within download_candidate_jobs where necessary.
 
-    * Calls deadline:GetJob to get job attachments manifest information if it is not stored yet.
+    * Calls boto3 deadline.get_job() to get job attachments manifest information and storage profile id if it is not stored yet.
+
+    Args:
+        boto3_session: The boto3.Session for accessing AWS.
+        farm_id: The farm id for the operation.
+        queue_id: The queue id for the operation.
+        checkpoint: The checkpoint for the incremental download.
+        download_candidate_jobs: The result of a _get_download_candidate_jobs call, {job_id: job} where
+            job is a result from a deadline.search_jobs() or deadline.get_job() call.
+        new_completed_timestamp: This is the timestamp value that will be placed in
+            checkpoint.downloads_completed_timestamp when saving the checkpoint.
+        print_function_callback: Callback for printing output to the terminal or log.
     """
     deadline = boto3_session.client("deadline")
     checkpoint_jobs = {job.job_id: job.job for job in checkpoint.jobs}
@@ -216,17 +238,18 @@ def _categorize_jobs_in_checkpoint(
     )
     start_time = datetime.now(tz=timezone.utc)
 
-    became_inactive_job_ids = checkpoint_job_ids.difference(download_candidate_job_ids)
+    finished_tracking_job_ids = checkpoint_job_ids.difference(download_candidate_job_ids)
     updated_job_ids = checkpoint_job_ids.intersection(download_candidate_job_ids)
     new_job_ids = download_candidate_job_ids.difference(checkpoint_job_ids)
     # The following sets get populated while analyzing the jobs
     unchanged_job_ids = set()
     attachments_free_job_ids = set()
+    missing_storage_profile = set()
     completed_job_ids = set()
 
-    # Copy the job attachments manifest data from the checkpoint to the new job objects. This data is not returned
-    # by deadline:SearchJobs, so we need to call deadline:GetJob on every job to retrieve it. The manifests on a job
-    # don't change, so after the call to deadline:GetJob we can cache it indefinitely.
+    # Copy the job attachments manifest data and storage profile id from the checkpoint to the new job objects. This data
+    # is not returned by deadline:SearchJobs, so we need to call deadline:GetJob on every job to retrieve it. This data
+    # on a job don't change, so after the call to deadline:GetJob we can cache it indefinitely.
     for job_id in updated_job_ids:
         ip_job = checkpoint_jobs[job_id]
         dc_job = download_candidate_jobs[job_id]
@@ -238,11 +261,18 @@ def _categorize_jobs_in_checkpoint(
             # Carry over the minimal placeholder identifying the job as not using job attachments
             download_candidate_jobs[job_id] = ip_job
             attachments_free_job_ids.add(job_id)
+        elif ip_job["storageProfileId"] is None and checkpoint.local_storage_profile_id is not None:
+            # Carry over the minimal placeholder identifying the job as missing a storage profile
+            download_candidate_jobs[job_id] = ip_job
+            missing_storage_profile.add(job_id)
         else:
             # Copy the attachments manifest metadata as it is not returned by deadline:SearchJobs
             dc_job["attachments"] = ip_job["attachments"]
+            dc_job["storageProfileId"] = ip_job["storageProfileId"]
+
     updated_job_ids.difference_update(attachments_free_job_ids)
     updated_job_ids.difference_update(new_job_ids)
+    updated_job_ids.difference_update(missing_storage_profile)
 
     # Prune jobs that we are (almost) certain have no changes by looking at its task status counts. We treat a job as unchanged if its
     # value job["taskRunStatusCounts"]["SUCCEEDED"] stayed the same and its timestamp job["endedAt"] stayed the same.
@@ -265,8 +295,8 @@ def _categorize_jobs_in_checkpoint(
             unchanged_job_ids.add(job_id)
     updated_job_ids.difference_update(unchanged_job_ids)
 
-    # First make note of any jobs that were dropped, for example if they were canceled or they failed
-    for job_id in became_inactive_job_ids:
+    # First make note of any jobs that were dropped from tracking, for example if they were canceled or they failed
+    for job_id in finished_tracking_job_ids:
         ip_job = checkpoint_jobs[job_id]
         if "taskRunStatusCounts" in ip_job:
             ip_succeeded_task_count = ip_job["taskRunStatusCounts"]["SUCCEEDED"]
@@ -277,7 +307,7 @@ def _categorize_jobs_in_checkpoint(
 
         # Print something only if the job is more than a minimal "jobId" tracker
         if set(ip_job.keys()) != {"jobId"}:
-            print_function_callback(f"DROPPED Job: {ip_job['name']} ({job_id})")
+            print_function_callback(f"FINISHED TRACKING Job: {ip_job['name']} ({job_id})")
             if ip_job["attachments"] is None:
                 print_function_callback("  Job without job attachments is no longer active")
             elif ip_succeeded_task_count == ip_total_task_count:
@@ -332,6 +362,7 @@ def _categorize_jobs_in_checkpoint(
         # Call deadline:GetJob to retrieve attachments manifest information
         job = deadline.get_job(jobId=job_id, queueId=queue_id, farmId=farm_id)
         dc_job["attachments"] = job.get("attachments")
+        dc_job["storageProfileId"] = job.get("storageProfileId")
         dc_succeeded_task_count = dc_job["taskRunStatusCounts"]["SUCCEEDED"]
         dc_total_task_count = sum(value for _, value in dc_job["taskRunStatusCounts"].items())
 
@@ -351,7 +382,11 @@ def _categorize_jobs_in_checkpoint(
             attachments_free_job_ids.add(job_id)
             print_function_callback("  Job does not use job attachments.")
         else:
-            print_function_callback(textwrap.indent(_cli_object_repr(dc_job["attachments"]), "  "))
+            print_function_callback("  Manifest file system paths:")
+            for manifest in dc_job["attachments"]["manifests"]:
+                print_function_callback(
+                    f"    - {manifest['rootPath']} ({manifest['rootPathFormat']})"
+                )
 
         if (
             dc_succeeded_task_count == dc_total_task_count
@@ -365,7 +400,7 @@ def _categorize_jobs_in_checkpoint(
     result = CategorizedJobIds()
     result.attachments_free = attachments_free_job_ids
     result.completed = completed_job_ids
-    result.inactive = became_inactive_job_ids
+    result.inactive = finished_tracking_job_ids
     result.added = new_job_ids
     result.unchanged = unchanged_job_ids
     result.updated = updated_job_ids
@@ -376,23 +411,158 @@ def _categorize_jobs_in_checkpoint(
     return result
 
 
-def _get_job_sessions(
-    boto3_session: boto3.Session,
+def _retrieve_sessions_for_job(
+    deadline_client: BaseClient,
+    checkpoint: IncrementalDownloadState,
     farm_id: str,
     queue_id: str,
+    job_id: str,
+    session_ended_threshold: datetime,
+    output_job_sessions: dict[str, list],
+):
+    """
+    Uses deadline.list_sessions to get all sessions of the specified job that are still running or
+    that ended after session_ended_threshold.
+
+    Places the output into output_job_sessions[job_id]
+
+    Args:
+        deadline_client: A boto3 client for accessing Deadline.
+        checkpoint: The checkpoint for the incremental download.
+        farm_id: The farm id for the operation.
+        queue_id: The queue id for the operation.
+        job_id: The job id to process.
+        session_ended_threshold: The timestamp threshold to filter out older sessions based on the endedAt field.
+        output_job_sessions: A dictionary {job_id: session_list} to populate for the provided job id.
+    """
+    sessions_paginator = deadline_client.get_paginator("list_sessions")
+    # Filter out older sessions by endedAt timestamp, using an eventual consistency window to accept a little extra
+    session_ended_threshold = session_ended_threshold - timedelta(
+        seconds=checkpoint.eventual_consistency_max_seconds
+    )
+
+    session_list: list[dict[str, Any]] = []
+    for sessions_page in sessions_paginator.paginate(
+        farmId=farm_id, queueId=queue_id, jobId=job_id
+    ):
+        for session in sessions_page.get("sessions", []):
+            if "endedAt" not in session or session["endedAt"] >= session_ended_threshold:
+                session_list.append(session)
+    if session_list:
+        output_job_sessions[job_id] = session_list
+
+
+def _retrieve_session_actions_for_session(
+    deadline_client: BaseClient,
+    checkpoint_job_session_completed_indexes: dict[str, dict[str, int]],
+    farm_id: str,
+    queue_id: str,
+    job_id: str,
+    output_session: dict[str, Any],
+):
+    """
+    Args:
+        deadline_client: A boto3 client for accessing Deadline.
+        checkpoint_job_session_completed_indexes: All the jobs' session action indexes loaded from the checkpoint.
+            The value checkpoint_job_session_completed_indexes[job_id][session_id] is the session action index of
+            the latest session action that is completed download.
+        farm_id: The farm id for the operation.
+        queue_id: The queue id for the operation.
+        job_id: The job id to process.
+        output_session: The session to populate with a sessionActions field.
+    """
+    session_actions_paginator = deadline_client.get_paginator("list_session_actions")
+
+    session_action_list: list[dict[str, Any]] = []
+    for session_actions_page in session_actions_paginator.paginate(
+        farmId=farm_id,
+        queueId=queue_id,
+        jobId=job_id,
+        sessionId=output_session["sessionId"],
+    ):
+        # Include only succeeded taskRun actions.
+        for session_action in session_actions_page.get("sessionActions", []):
+            succeeded = session_action.get("status") == "SUCCEEDED"
+            is_task_run = "taskRun" in session_action.get("definition", {})
+            if succeeded and is_task_run:
+                session_action_list.append(session_action)
+
+    if session_action_list:
+        # Extract the session action indexes from the ids
+        for session_action in session_action_list:
+            # Session action IDs look like "sessionaction-abc123-12" for index 12
+            session_action_index = int(session_action["sessionActionId"].rsplit("-", 1)[-1])
+            session_action["sessionActionIndex"] = session_action_index
+        # Include only session action indexes newer than latest downloaded ones from the checkpoint
+        session_completed_index: Optional[int] = checkpoint_job_session_completed_indexes.get(
+            job_id, {}
+        ).get(output_session["sessionId"])
+        if session_completed_index is not None:
+            # Filter out older session actions that were already downloaded
+            session_action_list = [
+                session_action
+                for session_action in session_action_list
+                if session_action["sessionActionIndex"] > session_completed_index
+            ]
+        if session_action_list:
+            output_session["sessionActions"] = session_action_list
+
+
+def _get_job_sessions(
+    boto3_session: boto3.Session,
+    boto3_session_for_s3: boto3.Session,
+    farm_id: str,
+    queue: dict[str, Any],
     checkpoint_job_session_completed_indexes: dict[str, dict[str, int]],
     categorized_job_ids: CategorizedJobIds,
     checkpoint: IncrementalDownloadState,
+    download_candidate_jobs: dict[str, dict[str, Any]],
     print_function_callback: Callable[[str], None] = lambda msg: None,
 ) -> dict[str, list]:
     """
     This function gets all the job sessions and session actions from the completed, added, and updated jobs.
     It uses the checkpoint's session_completed_indexes to filter out older session actions that are already downloaded.
+
+    Args:
+        boto3_session: The boto3.Session for accessing AWS.
+        boto3_session_for_s3: The boto3.Session to use for accessing S3.
+        farm_id: The farm id for the operation.
+        queue: The queue as returned by boto3 deadline.get_queue().
+        checkpoint_job_session_completed_indexes: All the jobs' session action indexes loaded from the checkpoint.
+            The value checkpoint_job_session_completed_indexes[job_id][session_id] is the session action index of
+            the latest session action that is completed download.
+        categorized_job_ids: The categorized job ids as returned by _categorize_jobs_in_checkpoint().
+        checkpoint: The checkpoint for the incremental download.
+        download_candidate_jobs: The result of a _get_download_candidate_jobs call, {job_id: job} where
+            job is a result from a deadline.search_jobs() or deadline.get_job() call.
+        print_function_callback: Callback for printing output to the terminal or log.
+
+    Returns:
+        Access a session action in the returned job_sessions with
+            job_sessions[job_id][session_index]["sessionActions"][session_action_index]
+        The returned structure looks like this:
+        {
+            "<job_id>": [
+                {
+                    "sessionId": "<session_id>",
+                    ...,
+                    "sessionActions": [
+                        {
+                            "sessionActionId": "<session_action_id>",
+                            ...
+                        },
+                        ...
+                    ]
+                },
+                ...
+            ],
+            ...
+        }
     """
     job_ids = categorized_job_ids.completed.union(categorized_job_ids.added).union(
         categorized_job_ids.updated
     )
-    print_function_callback(f"Retrieving session actions for {len(job_ids)} jobs...")
+    print_function_callback(f"Retrieving sessions for {len(job_ids)} jobs...")
     start_time = datetime.now(tz=timezone.utc)
 
     # The max timestamp of a downloaded session's endedAt provides a lower bound to filter sessions by.
@@ -405,76 +575,271 @@ def _get_job_sessions(
 
     deadline = boto3_session.client("deadline")
     job_sessions: dict[str, list] = {}
-    sessions_paginator = deadline.get_paginator("list_sessions")
-    for job_id in job_ids:
-        # Use the greater of the bootstrap command timestamp and the session ended timestamps
-        # recorded in the checkpoint.
-        session_ended_timestamp = job_session_ended_timestamp.get(job_id)
-        if session_ended_timestamp is None:
-            session_ended_timestamp = checkpoint.downloads_started_timestamp
 
-        session_list: list[dict[str, Any]] = []
-        for sessions_page in sessions_paginator.paginate(
-            farmId=farm_id, queueId=queue_id, jobId=job_id
-        ):
-            # Filter out older sessions by endedAt timestamp, using an eventual consistency window to accept a little extra
-            session_ended_timestamp = session_ended_timestamp - timedelta(
-                seconds=checkpoint.eventual_consistency_max_seconds
-            )
-            session_list.extend(
-                session
-                for session in sessions_page.get("sessions", [])
-                if "endedAt" not in session or session["endedAt"] >= session_ended_timestamp
-            )
-        if session_list:
-            job_sessions[job_id] = session_list
+    # Retrieve all the sessions with some parallelism
+    max_workers = SESSIONS_API_MAX_CONCURRENCY
+    print_function_callback(f"Using {max_workers} threads")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for job_id in job_ids:
+            # Use the greater of the bootstrap command timestamp and the session ended timestamps
+            # recorded in the checkpoint.
+            session_ended_threshold = job_session_ended_timestamp.get(job_id)
+            if session_ended_threshold is None:
+                session_ended_threshold = checkpoint.downloads_started_timestamp
 
-    # Retrieve the session actions for all the sessions that we found
-    session_actions_paginator = deadline.get_paginator("list_session_actions")
-    for job_id, session_list in job_sessions.items():
-        for session in session_list:
-            session_action_list: list[dict[str, Any]] = []
-            for session_actions_page in session_actions_paginator.paginate(
-                farmId=farm_id, queueId=queue_id, jobId=job_id, sessionId=session["sessionId"]
-            ):
-                # Include only succeeded taskRun actions, and filter out any actions that ended before the
-                # start of the update time interval
-                session_action_list.extend(
-                    session_action
-                    for session_action in session_actions_page.get("sessionActions", [])
-                    if session_action.get("status") == "SUCCEEDED"
-                    and "taskRun" in session_action.get("definition", {})
-                    and not (
-                        "endedAt" in session_action
-                        and session_action["endedAt"] < checkpoint.downloads_completed_timestamp
-                    )
+            futures.append(
+                executor.submit(
+                    _retrieve_sessions_for_job,
+                    deadline,
+                    checkpoint,
+                    farm_id,
+                    queue["queueId"],
+                    job_id,
+                    session_ended_threshold,
+                    job_sessions,
                 )
-            if session_action_list:
-                # Extract the session action indexes from the ids
-                for session_action in session_action_list:
-                    # Session action IDs look like "sessionaction-abc123-12" for index 12
-                    session_action_index = int(session_action["sessionActionId"].rsplit("-", 1)[-1])
-                    session_action["sessionActionIndex"] = session_action_index
-                # Include only session action indexes newer than latest downloaded ones from the checkpoint
-                session_completed_index: Optional[int] = (
-                    checkpoint_job_session_completed_indexes.get(job_id, {}).get(
-                        session["sessionId"]
-                    )
-                )
-                if session_completed_index is not None:
-                    # Filter out older session actions that were already downloaded
-                    session_action_list = [
-                        session_action
-                        for session_action in session_action_list
-                        if session_action["sessionActionIndex"] > session_completed_index
-                    ]
-                if session_action_list:
-                    session["sessionActions"] = session_action_list
+            )
+
+        # surfaces any exceptions in the thread
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
 
     duration = datetime.now(tz=timezone.utc) - start_time
     print_function_callback(f"...retrieval completed in {duration}")
 
+    print_function_callback("")
+    print_function_callback(
+        f"Retrieving session actions for {sum(len(session_list) for session_list in job_sessions.values())} sessions..."
+    )
+    start_time = datetime.now(tz=timezone.utc)
+
+    # Retrieve all the session actions with some parallelism
+    max_workers = SESSIONS_API_MAX_CONCURRENCY
+    print_function_callback(f"Using {max_workers} threads")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for job_id, session_list in job_sessions.items():
+            for session in session_list:
+                futures.append(
+                    executor.submit(
+                        _retrieve_session_actions_for_session,
+                        deadline,
+                        checkpoint_job_session_completed_indexes,
+                        farm_id,
+                        queue["queueId"],
+                        job_id,
+                        session,
+                    )
+                )
+        # surfaces any exceptions in the thread
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
+
+    duration = datetime.now(tz=timezone.utc) - start_time
+    print_function_callback(f"...retrieval completed in {duration}")
+
+    print_function_callback("")
+    print_function_callback("Populating missing manifest S3 keys...")
+    start_time = datetime.now(tz=timezone.utc)
+
+    _add_missing_output_manifests_to_job_sessions(
+        boto3_session_for_s3, farm_id, queue, job_sessions, download_candidate_jobs
+    )
+
+    _filter_session_actions_without_manifests_from_job_sessions(
+        job_sessions,
+        download_candidate_jobs,
+        print_function_callback,
+    )
+
+    duration = datetime.now(tz=timezone.utc) - start_time
+    print_function_callback(f"...populated in {duration}")
+
     return job_sessions
+
+
+def _get_storage_profiles(
+    deadline: BaseClient,
+    farm_id: str,
+    queue: dict[str, Any],
+    job_sessions: dict[str, list],
+    checkpoint: IncrementalDownloadState,
+    download_candidate_jobs: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Retrieves all the needed storage profiles. To call this function,
+    checkpoint.local_storage_profile_id must be set.
+
+    Args:
+        deadline: An AWS client for calling deadline APIs.
+        farm_id: The farm id for the operation.
+        queue: The queue as returned by boto3 deadline.get_queue().
+        checkpoint: The checkpoint for the incremental download.
+        job_sessions: Contains each job's sessions and session actions, structured as job_sessions[job_id][session_index]["sessionActions"][session_action_index].
+                      See the function _get_job_sessions for more details.
+        download_candidate_jobs: The result of a _get_download_candidate_jobs call, {job_id: job} where
+            job is a result from a deadline.search_jobs() or deadline.get_job() call.
+    """
+    if checkpoint.local_storage_profile_id is None:
+        raise ValueError("The checkpoint local storage profile id must be set.")
+
+    # Collect all the storage profile ids
+    storage_profile_ids: set[str] = {checkpoint.local_storage_profile_id}
+    for job_id in job_sessions.keys():
+        storage_profile_ids.add(download_candidate_jobs[job_id]["storageProfileId"])
+
+    # Load all the storage profiles from Deadline Cloud
+    storage_profiles = {
+        storage_profile_id: deadline.get_storage_profile_for_queue(
+            farmId=farm_id,
+            queueId=queue["queueId"],
+            storageProfileId=storage_profile_id,
+        )
+        for storage_profile_id in storage_profile_ids
+    }
+
+    return storage_profiles
+
+
+def _create_path_mapping_rule_appliers(
+    storage_profiles: dict[str, dict[str, Any]],
+    checkpoint: IncrementalDownloadState,
+    download_candidate_jobs: dict[str, dict[str, Any]],
+    print_function_callback: Callable[[str], None] = lambda msg: None,
+) -> dict[str, Optional[_PathMappingRuleApplier]]:
+    """
+    Retrieves all the needed storage profiles and constructs path mapping rule applies for them.
+    To call this function, checkpoint.local_storage_profile_id must be set.
+
+    Args:
+        storage_profiles: A mapping from storage profile id to the storage profile as returned by boto3 deadline.get_storage_profile_for_queue.
+        checkpoint: The checkpoint for the incremental download.
+        job_sessions: Contains each job's sessions and session actions, structured as job_sessions[job_id][session_index]["sessionActions"][session_action_index].
+                      See the function _get_job_sessions for more details.
+        download_candidate_jobs: The result of a _get_download_candidate_jobs call, {job_id: job} where
+            job is a result from a deadline.search_jobs() or deadline.get_job() call.
+        print_function_callback: Callback for printing output to the terminal or log.
+    """
+    if checkpoint.local_storage_profile_id is None:
+        raise ValueError("The checkpoint local storage profile id must be set.")
+
+    path_mapping_rule_appliers: dict[str, Optional[_PathMappingRuleApplier]] = {}
+
+    # Create a path mapping rule applier for each storage profile
+    local_storage_profile = storage_profiles[checkpoint.local_storage_profile_id]
+    local_storage_profile_name = local_storage_profile["displayName"]
+    print_function_callback("")
+    print_function_callback(
+        f"Local storage profile is {local_storage_profile_name} ({checkpoint.local_storage_profile_id})"
+    )
+    print_function_callback(
+        f"  {len([job for job in download_candidate_jobs.values() if job.get('storageProfileId') == checkpoint.local_storage_profile_id])} download candidate jobs will have no path mapping because they use this storage profile"
+    )
+    for storage_profile_id, storage_profile in storage_profiles.items():
+        storage_profile_name = storage_profile["displayName"]
+        if storage_profile_id == checkpoint.local_storage_profile_id:
+            path_mapping_rule_appliers[storage_profile_id] = None
+        else:
+            rules = _generate_path_mapping_rules(storage_profile, local_storage_profile)
+            path_mapping_rule_appliers[storage_profile_id] = _PathMappingRuleApplier(rules)
+
+            # Print the path mapping rules for each source storage profile
+            print_function_callback("")
+            job_count = len(
+                [
+                    job
+                    for job in download_candidate_jobs.values()
+                    if job.get("storageProfileId") == storage_profile_id
+                ]
+            )
+            print_function_callback(
+                f"Path mapping rules for {job_count} download candidate jobs with storage profile {storage_profile_name} ({storage_profile_id})"
+            )
+            print_function_callback(
+                f"  job storage profile: {storage_profile_name} ({storage_profile['osFamily']})"
+            )
+            print_function_callback(
+                f"  local storage profile: {local_storage_profile_name} ({local_storage_profile['osFamily']})"
+            )
+            if rules:
+                for rule in rules:
+                    print_function_callback(f"  - from: {rule.source_path}")
+                    print_function_callback(f"    to:   {rule.destination_path}")
+            else:
+                print_function_callback(
+                    f"   No rules generated. Storage profiles {local_storage_profile_name} and {storage_profile_name} share no file system location names."
+                )
+    return path_mapping_rule_appliers
+
+
+def _add_missing_output_manifests_to_job_sessions(
+    boto3_session_for_s3: boto3.Session,
+    farm_id: str,
+    queue: dict[str, Any],
+    job_sessions: dict[str, list],
+    download_candidate_jobs: dict[str, dict[str, Any]],
+):
+    """
+    Args:
+        boto3_session_for_s3: The boto3.Session to use for accessing S3.
+        farm_id: The farm id for the operation.
+        queue: The queue as returned by boto3 deadline.get_queue().
+        job_sessions: Contains each job's sessions and session actions, structured as job_sessions[job_id][session_index]["sessionActions"][session_action_index].
+                      See the function _get_job_sessions for more details.
+        download_candidate_jobs: The result of a _get_download_candidate_jobs call, {job_id: job} where
+            job is a result from a deadline.search_jobs() or deadline.get_job() call.
+    """
+    for job_id, session_list in job_sessions.items():
+        job = download_candidate_jobs[job_id]
+        session_action_list = [
+            session_action
+            for session in session_list
+            for session_action in session.get("sessionActions", [])
+        ]
+        _add_output_manifests_from_s3(
+            farm_id, queue, job, boto3_session_for_s3, session_action_list
+        )
+
+
+def _filter_session_actions_without_manifests_from_job_sessions(
+    job_sessions: dict[str, list],
+    download_candidate_jobs: dict[str, dict[str, Any]],
+    print_function_callback: Callable[[str], None] = lambda msg: None,
+):
+    """
+    Modify job_sessions in place to filter out any session actions that lack any output manifests.
+    Print a warning message for any job that had a session action like this.
+
+    Args:
+        job_sessions: Contains each job's sessions and session actions, structured as job_sessions[job_id][session_index]["sessionActions"][session_action_index].
+                      See the function _get_job_sessions for more details.
+        download_candidate_jobs: The result of a _get_download_candidate_jobs call, {job_id: job} where
+            job is a result from a deadline.search_jobs() or deadline.get_job() call.
+        print_function_callback: Callback for printing output to the terminal or log.
+    """
+    for job_id, session_list in job_sessions.items():
+        job = download_candidate_jobs[job_id]
+        total_count = 0
+        filtered_count = 0
+        for session in session_list:
+            total_count += len(session.get("sessionActions", []))
+            # Filter out session actions with no manifest files
+            filtered_session_action_list = [
+                session_action
+                for session_action in session.get("sessionActions", [])
+                if any(item != {} for item in session_action["manifests"])
+            ]
+            filtered_count += len(filtered_session_action_list)
+            if total_count != filtered_count:
+                session["sessionActions"] = filtered_session_action_list
+        if total_count != filtered_count:
+            print_function_callback(
+                f"WARNING: Job {job['name']} ({job_id}) ran {total_count - filtered_count} / {total_count} session actions with no output."
+            )
+            print_function_callback(
+                "         This may indicate steps in the job that strictly perform validation or save results elsewhere like a shared file system or S3."
+            )
 
 
 def _update_checkpoint_jobs_list(
@@ -485,6 +850,14 @@ def _update_checkpoint_jobs_list(
 ):
     """
     Update the jobs list in the checkpoint object.
+
+    Args:
+        checkpoint: The checkpoint for the incremental download.
+        download_candidate_jobs: The result of a _get_download_candidate_jobs call, {job_id: job} where
+            job is a result from a deadline.search_jobs() or deadline.get_job() call.
+        categorized_job_ids: The categorized job ids as returned by _categorize_jobs_in_checkpoint().
+        job_sessions: Contains each job's sessions and session actions, structured as job_sessions[job_id][session_index]["sessionActions"][session_action_index].
+                      See the function _get_job_sessions for more details.
     """
     updated_jobs: list[IncrementalDownloadJob] = []
 
@@ -547,6 +920,23 @@ def _update_checkpoint_jobs_list(
                 {},
             )
         )
+    # This category keeps a signal that it is missing a storage profile by populating the attachments but
+    # having a storageProfileId field with None in it. By keeping the attachments in the checkpoint, someone
+    # inspecting the checkpoint to understand what's happening can get an idea about the paths for the job
+    # and diagnose problems quicker.
+    for job_id in categorized_job_ids.missing_storage_profile:
+        updated_jobs.append(
+            IncrementalDownloadJob(
+                {
+                    "jobId": job_id,
+                    "name": download_candidate_jobs[job_id]["name"],
+                    "attachments": download_candidate_jobs[job_id]["attachments"],
+                    "storageProfileId": None,
+                },
+                None,
+                {},
+            )
+        )
     # Keep completed jobs around until they become inactive
     for job_id in categorized_job_ids.completed:
         updated_jobs.append(
@@ -556,7 +946,9 @@ def _update_checkpoint_jobs_list(
                 job_session_completed_indexes.get(job_id, {}),
             )
         )
-    # When a job becomes inactive, keep it around in minimal form when it has a session_ended_timestamp
+    # When a job becomes inactive, keep it around in minimal form when it has a session_ended_timestamp.
+    # This is necessary for the case where a completed job gets requeued later. We can't tell
+    # that it was requeued from the deadline.search_jobs query, so we hold this metadata in the checkpoint.
     for job_id in categorized_job_ids.inactive:
         session_ended_timestamp = job_session_ended_timestamps.get(job_id)
         if session_ended_timestamp is not None:
@@ -570,40 +962,71 @@ def _update_checkpoint_jobs_list(
 @api.record_function_latency_telemetry_event()
 def _incremental_output_download(
     farm_id: str,
-    queue_id: str,
+    queue: dict[str, Any],
     boto3_session: boto3.Session,
-    download_state: IncrementalDownloadState,
+    checkpoint: IncrementalDownloadState,
+    config: Optional[ConfigParser] = None,
     print_function_callback: Callable[[str], None] = lambda msg: None,
+    *,
+    dry_run: bool = False,
 ) -> IncrementalDownloadState:
     """
     This function downloads all the task run outputs from the specified queue, that have become
-    available since the last time the function was called. The download_state object
+    available since the last time the function was called. The checkpoint object
     keeps track of all state needed to keep track of what needs to be downloaded.
 
-    :param farm_id: farm id for the output download
-    :param queue_id: queue for scoping output download
-    :param download_state: Download state for starting the incremental download
-    :param boto3_session: boto3 session
-    :param print_function_callback: Callback to print messages produced in this function.
-                Used in the CLI to print to stdout using click.echo. By default, ignores messages.
-    :return: updated downloaded state
+    Pre-condition: The input checkpoint holds all information needed to understand the state of downloads
+        completed up to the timestamp checkpoint.downloads_completed_timestamp. See the documentation
+        in the IncrementalDownloadState to understand the invariants of the checkpoint.
+
+    Post-condition: The output checkpoint has an updated checkpoint.downloads_completed_timestamp,
+        all downloads were performed up to at least this timestamp, and the checkpoint data
+        is updated to satisfy the next call's pre-condition.
+
+    Args:
+        farm_id: The farm id for the operation.
+        queue: The queue as returned by boto3 deadline.get_queue().
+        boto3_session: The boto3.Session for accessing AWS.
+        checkpoint: The checkpoint for the incremental download.
+        config: Optional, a Deadline Cloud configuration as loaded from config_file.read_config().
+        print_function_callback: Callback for printing output to the terminal or log.
+        dry_run: If True, the operation will print out information but not perform any data downloads.
+
+    Returns:
+        An updated checkpoint object.
     """
+    if sys.version_info < (3, 9):
+        raise DeadlineOperationError(
+            "The incremental-output-download command requires Python version 3.9 or later"
+        )
+
+    deadline = boto3_session.client("deadline")
+
     # When this function is done, we will be confident that downloads are complete up to
     # new_completed_timestamp. We subtract a duration from now() that gives a generous amount of
     # time for the deadline:SearchJobs API's eventual consistency to converge.
     current_timestamp = datetime.now(timezone.utc)
     new_completed_timestamp = max(
-        download_state.downloads_started_timestamp,
-        current_timestamp - timedelta(seconds=download_state.eventual_consistency_max_seconds),
+        checkpoint.downloads_started_timestamp,
+        current_timestamp - timedelta(seconds=checkpoint.eventual_consistency_max_seconds),
+    )
+
+    # The queue role is used for accessing S3
+    boto3_session_for_s3 = api.get_queue_user_boto3_session(
+        deadline=deadline,
+        config=config,
+        farm_id=farm_id,
+        queue_id=queue["queueId"],
+        queue_display_name=queue["displayName"],
     )
 
     print_function_callback("Updating download state across time interval:")
     print_function_callback(
-        f"    From: {download_state.downloads_completed_timestamp.astimezone().isoformat()}"
+        f"    From: {checkpoint.downloads_completed_timestamp.astimezone().isoformat()}"
     )
     print_function_callback(f"      To: {current_timestamp.astimezone().isoformat()}")
-    update_length = current_timestamp - download_state.downloads_completed_timestamp
-    eventual_consistency_delta = timedelta(seconds=download_state.eventual_consistency_max_seconds)
+    update_length = current_timestamp - checkpoint.downloads_completed_timestamp
+    eventual_consistency_delta = timedelta(seconds=checkpoint.eventual_consistency_max_seconds)
     if update_length > eventual_consistency_delta:
         print_function_callback(
             f"  Length: {update_length - eventual_consistency_delta} + {eventual_consistency_delta} (eventual consistency allowance)"
@@ -615,15 +1038,15 @@ def _incremental_output_download(
 
     # Save all the jobs' session action indexes from the checkpoint, before we update the checkpoint's jobs list
     checkpoint_job_session_completed_indexes: dict[str, dict[str, int]] = {
-        job.job_id: job.session_completed_indexes for job in download_state.jobs
+        job.job_id: job.session_completed_indexes for job in checkpoint.jobs
     }
 
     # Call deadline:SearchJobs to get a set of jobs that includes every job with downloads available.
     download_candidate_jobs: dict[str, dict[str, Any]] = _get_download_candidate_jobs(
         boto3_session,
         farm_id,
-        queue_id,
-        download_state.downloads_completed_timestamp,
+        queue["queueId"],
+        checkpoint.downloads_completed_timestamp,
         print_function_callback,
     )
 
@@ -633,8 +1056,8 @@ def _incremental_output_download(
     categorized_job_ids: CategorizedJobIds = _categorize_jobs_in_checkpoint(
         boto3_session,
         farm_id,
-        queue_id,
-        download_state,
+        queue["queueId"],
+        checkpoint,
         download_candidate_jobs,
         new_completed_timestamp,
         print_function_callback,
@@ -645,31 +1068,144 @@ def _incremental_output_download(
     # All the completed, added, and updated jobs might have downloads available. Retrieve the sessions for these jobs.
     job_sessions: dict[str, list] = _get_job_sessions(
         boto3_session,
+        boto3_session_for_s3,
         farm_id,
-        queue_id,
+        queue,
         checkpoint_job_session_completed_indexes,
         categorized_job_ids,
-        download_state,
+        checkpoint,
+        download_candidate_jobs,
         print_function_callback,
     )
 
-    # Use the information collected so far to update the jobs list in download_state
+    # If storage profiles are being used, get them and construct all the path mapping rules
+    path_mapping_rule_appliers: dict[str, Optional[_PathMappingRuleApplier]] = {}
+    if checkpoint.local_storage_profile_id:
+        storage_profiles = _get_storage_profiles(
+            deadline, farm_id, queue, job_sessions, checkpoint, download_candidate_jobs
+        )
+        path_mapping_rule_appliers = _create_path_mapping_rule_appliers(
+            storage_profiles,
+            checkpoint,
+            download_candidate_jobs,
+            print_function_callback,
+        )
+
+    # Use the information collected so far to update the jobs list in checkpoint
     _update_checkpoint_jobs_list(
-        download_state, download_candidate_jobs, categorized_job_ids, job_sessions
+        checkpoint, download_candidate_jobs, categorized_job_ids, job_sessions
     )
 
-    print("Job session + session actions:")
-    print_function_callback(_cli_object_repr(job_sessions))
+    unmapped_paths: dict[str, list[str]] = {}
+    downloaded_manifests: list[tuple[datetime, BaseAssetManifest]] = (
+        _download_all_manifests_with_absolute_paths(
+            queue,
+            download_candidate_jobs,
+            job_sessions,
+            path_mapping_rule_appliers,
+            unmapped_paths,
+            boto3_session_for_s3,
+            print_function_callback,
+        )
+    )
 
-    # TODO the rest of the incremental output download
+    # Print warning messages about all the output paths that will not be downloaded due to lack of path mapping.
+    if unmapped_paths:
+        print_function_callback("")
+        for job_id, unmapped_path_list in unmapped_paths.items():
+            print_function_callback(
+                f"WARNING: Job {download_candidate_jobs[job_id]['name']} ({job_id}) has outputs with unmapped paths"
+            )
+            storage_profile = storage_profiles[download_candidate_jobs[job_id]["storageProfileId"]]
+            print_function_callback(
+                f"         Job storage profile is {storage_profile['displayName']} ({storage_profile['storageProfileId']})"
+            )
+            print_function_callback("         Summary of unmapped paths:")
+            path_format = (
+                PathFormat.WINDOWS
+                if storage_profile["osFamily"] == StorageProfileOperatingSystemFamily.WINDOWS.value
+                else PathFormat.POSIX
+            )
+            paths_summary = summarize_path_list(
+                unmapped_path_list, max_entries=30, path_format=path_format
+            )
+            print_function_callback(textwrap.indent(paths_summary, "         "))
+
+    # Merge the manifests ordered by the last modified timestamp
+    manifest_paths_to_download: list[BaseManifestPath] = _merge_absolute_path_manifest_list(
+        downloaded_manifests
+    )
+
+    # Print a summary of all the paths before starting the download
+    local_path_list = [manifest_path.path for manifest_path in manifest_paths_to_download]
+    file_size_by_path = {
+        manifest_path.path: manifest_path.size for manifest_path in manifest_paths_to_download
+    }
+    print_function_callback("")
+    print_function_callback("Summary of paths to download:")
+    print_function_callback(
+        summarize_path_list(local_path_list, total_size_by_path=file_size_by_path, max_entries=30)
+    )
+    print_function_callback("")
+
+    if not dry_run:
+        print_function_callback(f"Downloading {len(manifest_paths_to_download)} files from S3...")
+        start_time = datetime.now(tz=timezone.utc)
+
+        # Incremental download is mostly a background thing, so don't print status too often while downloading
+        MIN_DELAY_BETWEEN_PRINTOUTS = 20
+        last_call_time = time.time() - MIN_DELAY_BETWEEN_PRINTOUTS
+        printed_100_percent = False
+
+        def _update_download_progress(
+            download_metadata: ProgressReportMetadata,
+        ) -> bool:
+            nonlocal last_call_time, printed_100_percent
+
+            if not printed_100_percent and download_metadata.progress == 100:
+                print_function_callback(f"{download_metadata.progressMessage}")
+                last_call_time = time.time()
+                printed_100_percent = True
+            elif (
+                not printed_100_percent
+                and time.time() - last_call_time > MIN_DELAY_BETWEEN_PRINTOUTS
+            ):
+                print_function_callback(f"{download_metadata.progressMessage}")
+                last_call_time = time.time()
+
+            return sigint_handler.continue_operation
+
+        _download_manifest_paths(
+            manifest_paths_to_download,
+            HashAlgorithm.XXH128,
+            queue,
+            boto3_session_for_s3,
+            FileConflictResolution.OVERWRITE,
+            on_downloading_files=_update_download_progress,
+            print_function_callback=print_function_callback,
+        )
+
+        duration = datetime.now(tz=timezone.utc) - start_time
+        print_function_callback(f"...downloaded in {duration}")
+    else:
+        print_function_callback("Skipping downloads due to DRY RUN")
 
     # Update the timestamp in the state object to reflect the downloads that were completed
-    download_state.downloads_completed_timestamp = new_completed_timestamp
+    checkpoint.downloads_completed_timestamp = new_completed_timestamp
 
     print_function_callback("")
-    print_function_callback("Summary of incremental output download:")
+    if dry_run:
+        print_function_callback(
+            "Summary of DRY RUN for incremental output download (no files were downloaded to the file system):"
+        )
+    else:
+        print_function_callback("Summary of incremental output download:")
     print_function_callback(
         f"  Downloaded session actions: {sum(len(session.get('sessionActions', [])) for session_list in job_sessions.values() for session in session_list)}"
+    )
+    print_function_callback(f"  Downloaded files: {len(manifest_paths_to_download)}")
+    print_function_callback(
+        f"  Downloaded bytes: {human_readable_file_size(sum(path.size for path in manifest_paths_to_download))}"
     )
     print_function_callback("  Jobs with downloads:")
     print_function_callback(f"    completed: {len(categorized_job_ids.completed)}")
@@ -679,7 +1215,10 @@ def _incremental_output_download(
     print_function_callback(
         f"    not using job attachments: {len(categorized_job_ids.attachments_free)}"
     )
+    print_function_callback(
+        f"    missing storage profile: {len(categorized_job_ids.missing_storage_profile)}"
+    )
     print_function_callback(f"    unchanged: {len(categorized_job_ids.unchanged)}")
     print_function_callback(f"    inactive: {len(categorized_job_ids.inactive)}")
 
-    return download_state
+    return checkpoint

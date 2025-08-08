@@ -63,7 +63,7 @@ class OnCreateJobBundleCallback(Protocol):
         host_requirements: Optional[Dict[str, Any]] = None,
         *,
         purpose: JobBundlePurpose,
-    ) -> dict[str, Any]: ...
+    ) -> Optional[dict[str, Any]]: ...
 
 
 class SubmitJobToDeadlineDialog(QDialog):
@@ -124,11 +124,15 @@ class SubmitJobToDeadlineDialog(QDialog):
         self.job_settings_type = type(initial_job_settings)
         self.submitter_name = submitter_name or self.job_settings_type().submitter_name
         self.on_create_job_bundle_callback = on_create_job_bundle_callback
-        self.create_job_response: Optional[Dict[str, Any]] = None
+        self.job_id = None
+        self.create_job_response = (
+            None  # This parameter is deprecated and will be removed in 0.52.0
+        )
         self.job_history_bundle_dir: Optional[str] = None
         self.deadline_authentication_status = DeadlineAuthenticationStatus.getInstance()
         self.show_host_requirements_tab = show_host_requirements_tab
         self.known_asset_paths = known_asset_paths or []
+        self.should_close = False
 
         self._build_ui(
             job_setup_widget_type,
@@ -141,6 +145,15 @@ class SubmitJobToDeadlineDialog(QDialog):
 
         self.gui_update_counter: Any = None
         self.refresh_deadline_settings()
+
+    def _submission_succeeded_signal_receiver(self, job_id: str):
+        self.job_id = job_id
+
+        set_setting("defaults.job_id", job_id)
+
+    def _close_event_receiver(self):
+        if self.submitter_name != "JobBundle" and self.job_id:
+            self.close()
 
     def sizeHint(self):
         return QSize(540, 700)
@@ -192,6 +205,9 @@ class SubmitJobToDeadlineDialog(QDialog):
             self._build_host_requirements_tab(host_requirements)
 
         self.auth_status_box = DeadlineAuthenticationStatusWidget(self)
+        self.auth_status_box.switch_profile_clicked.connect(self.on_switch_profile_clicked)
+        self.auth_status_box.logout_clicked.connect(self.on_logout)
+        self.auth_status_box.login_clicked.connect(self.on_login)
         self.lyt.addWidget(self.auth_status_box)
         self.deadline_authentication_status.api_availability_changed.connect(
             self.refresh_deadline_settings
@@ -201,12 +217,6 @@ class SubmitJobToDeadlineDialog(QDialog):
         self.shared_job_settings.valid_parameters.connect(self._set_submit_button_state)
 
         self.button_box = QDialogButtonBox(Qt.Horizontal)
-        self.login_button = QPushButton("Login")
-        self.login_button.clicked.connect(self.on_login)
-        self.button_box.addButton(self.login_button, QDialogButtonBox.ResetRole)
-        self.logout_button = QPushButton("Logout")
-        self.logout_button.clicked.connect(self.on_logout)
-        self.button_box.addButton(self.logout_button, QDialogButtonBox.ResetRole)
         self.settings_button = QPushButton("Settings...")
         self.settings_button.clicked.connect(self.on_settings_button_clicked)
         self.button_box.addButton(self.settings_button, QDialogButtonBox.ResetRole)
@@ -239,17 +249,6 @@ class SubmitJobToDeadlineDialog(QDialog):
             self.submit_button.setToolTip("")
 
     def refresh_deadline_settings(self):
-        # Enable/disable the Login and Logout buttons based on whether
-        # the configured profile is for Deadline Cloud monitor
-        self.login_button.setEnabled(
-            self.deadline_authentication_status.creds_source
-            == api.AwsCredentialsSource.DEADLINE_CLOUD_MONITOR_LOGIN
-        )
-        self.logout_button.setEnabled(
-            self.deadline_authentication_status.creds_source
-            == api.AwsCredentialsSource.DEADLINE_CLOUD_MONITOR_LOGIN
-        )
-
         self._set_submit_button_state()
 
         self.shared_job_settings.deadline_cloud_settings_box.refresh_setting_controls(
@@ -358,6 +357,10 @@ class SubmitJobToDeadlineDialog(QDialog):
         # not always catch a change so force a refresh here.
         self.deadline_authentication_status.refresh_status()
 
+    def on_switch_profile_clicked(self):
+        if DeadlineConfigDialog.configure_settings(parent=self, set_profile_focus=True):
+            self.refresh_deadline_settings()
+
     def on_settings_button_clicked(self):
         if DeadlineConfigDialog.configure_settings(parent=self):
             self.refresh_deadline_settings()
@@ -465,9 +468,6 @@ class SubmitJobToDeadlineDialog(QDialog):
         """
         Perform a submission when the submit button is pressed
         """
-        # Unset any cached response
-        self.create_job_response = None
-
         # Retrieve all the settings into the dataclass
         settings = self.job_settings_type()
         self.shared_job_settings.update_settings(settings)
@@ -478,6 +478,10 @@ class SubmitJobToDeadlineDialog(QDialog):
         asset_references = self.job_attachments.get_asset_references()
 
         job_progress_dialog = SubmitJobProgressDialog(parent=self)
+        job_progress_dialog.submission_thread_succeeded.connect(
+            self._submission_succeeded_signal_receiver
+        )
+        job_progress_dialog.progress_window_closed.connect(self._close_event_receiver)
         job_progress_dialog.show()
         QApplication.instance().processEvents()  # type: ignore[union-attr]
 
@@ -517,7 +521,7 @@ class SubmitJobToDeadlineDialog(QDialog):
             if job_parameters:
                 self.save_job_parameters_to_job_bundle(self.job_history_bundle_dir, job_parameters)
 
-            job_id = job_progress_dialog.start_job_submission(
+            job_progress_dialog.start_job_submission(
                 job_bundle_dir=self.job_history_bundle_dir,
                 submitter_name=self.submitter_name,
                 config=config_file.read_config(),
@@ -526,8 +530,6 @@ class SubmitJobToDeadlineDialog(QDialog):
                 known_asset_paths=self.known_asset_paths
                 + parameters_from_callback.get("known_asset_paths", []),
             )
-            if job_id:
-                set_setting("defaults.job_id", job_id)
 
         except UserInitiatedCancel as uic:
             logger.info("Canceling submission.")
@@ -545,9 +547,3 @@ class SubmitJobToDeadlineDialog(QDialog):
             )
             QMessageBox.critical(self, f"{self.submitter_name} job submission", str(exc))  # type: ignore[call-arg]
             job_progress_dialog.close()
-
-        if self.create_job_response:
-            # Close the submitter window to signal the submission is done but
-            # keep the standalone gui submitter open
-            if self.submitter_name != "JobBundle":
-                self.close()
