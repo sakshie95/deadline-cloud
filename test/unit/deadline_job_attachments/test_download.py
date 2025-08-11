@@ -4,48 +4,38 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
-import sys
-import tempfile
+
 from collections import Counter
 from dataclasses import dataclass, fields
 from io import BytesIO
+import json
 from pathlib import Path
+import sys
+import tempfile
 from threading import Lock
-from typing import Any, Callable, DefaultDict
+from typing import Any, Callable, DefaultDict, List
 from unittest.mock import MagicMock, call, patch
 
 import boto3
-import pytest
 from botocore.exceptions import BotoCoreError, ClientError, ReadTimeoutError
 from botocore.stub import Stubber
 
+import pytest
+
 import deadline
-from deadline.job_attachments.api import human_readable_file_size
 from deadline.job_attachments.asset_manifests import HashAlgorithm
 from deadline.job_attachments.asset_manifests.base_manifest import (
     BaseAssetManifest,
-)
-from deadline.job_attachments.asset_manifests.base_manifest import (
     BaseManifestPath as BaseManifestPath,
 )
-from deadline.job_attachments.asset_manifests.decode import decode_manifest
 from deadline.job_attachments.asset_manifests.v2023_03_03 import (
     ManifestPath as ManifestPathv2023_03_03,
 )
 from deadline.job_attachments.asset_manifests.versions import ManifestVersion
 from deadline.job_attachments.download import (
-    VFS_CACHE_REL_PATH_IN_SESSION,
-    VFS_LOGS_FOLDER_IN_SESSION,
-    VFS_MANIFEST_FOLDER_IN_SESSION,
-    VFS_MANIFEST_FOLDER_PERMISSIONS,
     OutputDownloader,
-    _ensure_paths_within_directory,
-    _get_asset_root_from_metadata,
-    _get_new_copy_file_path,
-    _get_tasks_manifests_keys_from_s3,
     download_file,
     download_files_from_manifests,
     download_files_in_directory,
@@ -54,8 +44,16 @@ from deadline.job_attachments.download import (
     get_job_output_paths_by_asset_root,
     get_manifest_from_s3,
     handle_existing_vfs,
-    merge_asset_manifests,
     mount_vfs_from_manifests,
+    merge_asset_manifests,
+    _ensure_paths_within_directory,
+    _get_asset_root_from_metadata,
+    _get_new_copy_file_path,
+    _get_tasks_manifests_keys_from_s3,
+    VFS_CACHE_REL_PATH_IN_SESSION,
+    VFS_MANIFEST_FOLDER_IN_SESSION,
+    VFS_MANIFEST_FOLDER_PERMISSIONS,
+    VFS_LOGS_FOLDER_IN_SESSION,
 )
 from deadline.job_attachments.exceptions import (
     AssetSyncError,
@@ -72,19 +70,22 @@ from deadline.job_attachments.models import (
     ManifestPathGroup,
     Queue,
 )
-from deadline.job_attachments.os_file_permission import (
-    PosixFileSystemPermissionSettings,
-    WindowsFileSystemPermissionSettings,
-    WindowsPermissionEnum,
-)
 from deadline.job_attachments.progress_tracker import (
     DownloadSummaryStatistics,
     ProgressReportMetadata,
     ProgressStatus,
 )
+from deadline.job_attachments.asset_manifests.decode import decode_manifest
 
+from deadline.job_attachments.os_file_permission import (
+    PosixFileSystemPermissionSettings,
+    WindowsFileSystemPermissionSettings,
+    WindowsPermissionEnum,
+)
+from deadline.job_attachments.api import human_readable_file_size
+
+from .conftest import has_posix_target_user, has_posix_disjoint_user
 from ..conftest import is_windows_non_admin
-from .conftest import has_posix_disjoint_user, has_posix_target_user
 
 
 @dataclass
@@ -93,7 +94,7 @@ class Manifest:
     manifests: bytes
 
 
-MANIFESTS_v2022_03_03: list[Manifest] = [
+MANIFESTS_v2022_03_03: List[Manifest] = [
     Manifest(
         "job-1/step-1/task-1-1/session-action-9/manifest1v2023-03-03_output",
         b'{"hashAlg":"xxh128","manifestVersion":"2023-03-03",'
@@ -159,11 +160,11 @@ MANIFESTS_v2022_03_03: list[Manifest] = [
     ),
 ]
 
-MANIFEST_VERSION_TO_MANIFESTS: dict[ManifestVersion, list[Manifest]] = {
+MANIFEST_VERSION_TO_MANIFESTS: dict[ManifestVersion, List[Manifest]] = {
     ManifestVersion.v2023_03_03: MANIFESTS_v2022_03_03,
 }
 
-INPUT_ASSET_MANIFESTS_V2023_03_03: list[Manifest] = [
+INPUT_ASSET_MANIFESTS_V2023_03_03: List[Manifest] = [
     Manifest(
         "Inputs/0000/manifest_input",
         b'{"hashAlg":"xxh128","manifestVersion":"2023-03-03",'
@@ -177,7 +178,7 @@ INPUT_ASSET_MANIFESTS_V2023_03_03: list[Manifest] = [
     ),
 ]
 
-MANIFEST_VERSION_TO_INPUT_ASSET_MANIFESTS: dict[ManifestVersion, list[Manifest]] = {
+MANIFEST_VERSION_TO_INPUT_ASSET_MANIFESTS: dict[ManifestVersion, List[Manifest]] = {
     ManifestVersion.v2023_03_03: INPUT_ASSET_MANIFESTS_V2023_03_03,
 }
 
@@ -187,7 +188,7 @@ def assert_download_task_output(
     farm_id,
     queue_id,
     tmp_path: Path,
-    expected_files: dict[str, list[Path]],
+    expected_files: dict[str, List[Path]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -237,7 +238,7 @@ def assert_download_step_output(
     farm_id,
     queue_id,
     tmp_path: Path,
-    expected_files: dict[str, list[Path]],
+    expected_files: dict[str, List[Path]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -281,7 +282,7 @@ def assert_download_job_output(
     farm_id,
     queue_id,
     tmp_path: Path,
-    expected_files: dict[str, list[Path]],
+    expected_files: dict[str, List[Path]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -327,7 +328,7 @@ def assert_download_files_in_directory(
     queue_id: str,
     directory_path: str,
     tmp_path: Path,
-    expected_files: dict[str, list[Path]],
+    expected_files: dict[str, List[Path]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -371,7 +372,7 @@ def check_expected_files_present(expected_files, tmp_path):
 def assert_progress_tracker_values(
     manifest_version: ManifestVersion,
     summary_statistics: DownloadSummaryStatistics,
-    expected_files: dict[str, list[Path]],
+    expected_files: dict[str, List[Path]],
     expected_total_bytes: int,
     mock_on_downloading_files: MagicMock,
 ):
@@ -450,7 +451,7 @@ def assert_download_job_output_with_task_id_and_no_step_id_throws_error(
 def assert_get_job_input_paths_by_asset_root(
     s3_settings: JobAttachmentS3Settings,
     attachments: Attachments,
-    expected_files: dict[str, list[BaseManifestPath]],
+    expected_files: dict[str, List[BaseManifestPath]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -465,10 +466,7 @@ def assert_get_job_input_paths_by_asset_root(
                 files_by_hash_alg={
                     HashAlgorithm.XXH128: [
                         ManifestPathv2023_03_03(
-                            path="outputs/output.txt",
-                            hash="outputhash",
-                            size=100,
-                            mtime=1234567,
+                            path="outputs/output.txt", hash="outputhash", size=100, mtime=1234567
                         )
                     ],
                 },
@@ -493,7 +491,7 @@ def assert_get_job_output_paths_by_asset_root(
     s3_settings: JobAttachmentS3Settings,
     farm_id: str,
     queue_id: str,
-    expected_files: dict[str, list[BaseManifestPath]],
+    expected_files: dict[str, List[BaseManifestPath]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -539,7 +537,7 @@ def assert_get_job_input_output_paths_by_asset_root(
     attachments: Attachments,
     farm_id: str,
     queue_id: str,
-    expected_files: dict[str, list[BaseManifestPath]],
+    expected_files: dict[str, List[BaseManifestPath]],
     expected_total_bytes: int,
     manifest_version: ManifestVersion,
 ):
@@ -658,10 +656,7 @@ class TestFullDownload:
             path="inputs/subdir/input3.txt", hash="input3", size=1, mtime=1234000000
         ),
         ManifestPathv2023_03_03(
-            path="inputs/subdir/subdir2/input4.txt",
-            hash="input4",
-            size=1,
-            mtime=1234000000,
+            path="inputs/subdir/subdir2/input4.txt", hash="input4", size=1, mtime=1234000000
         ),
         ManifestPathv2023_03_03(path="inputs/input5.txt", hash="input5", size=1, mtime=1234000000),
     ]
@@ -988,8 +983,8 @@ class TestFullDownload:
         Tests whether the file system ownership and permissions of the downloaded files
         are correctly changed on Windows environment.
         """
-        import ntsecuritycon
         import win32security
+        import ntsecuritycon
 
         # Creates some files in the root directory that were not downloaded by Job Attachment.
         Path(tmp_path / "inputs/subdir/subdir2").mkdir(parents=True, exist_ok=True)
@@ -1593,8 +1588,7 @@ class TestFullDownload:
                 task_id=None,
             )
         with patch(
-            f"{deadline.__package__}.job_attachments.download.download_files",
-            return_value=[],
+            f"{deadline.__package__}.job_attachments.download.download_files", return_value=[]
         ), pytest.raises((PathOutsideDirectoryError, ValueError)):
             output_downloader.download_job_output()
 
@@ -1676,8 +1670,7 @@ class TestFullDownload:
         )
 
         with stubber, patch(
-            f"{deadline.__package__}.job_attachments.download.get_s3_client",
-            return_value=s3_client,
+            f"{deadline.__package__}.job_attachments.download.get_s3_client", return_value=s3_client
         ):
             with pytest.raises(JobAttachmentsS3ClientError) as exc:
                 get_manifest_from_s3("test-key", "test-bucket")
@@ -1729,8 +1722,7 @@ class TestFullDownload:
         )
 
         with stubber, patch(
-            f"{deadline.__package__}.job_attachments.download.get_s3_client",
-            return_value=s3_client,
+            f"{deadline.__package__}.job_attachments.download.get_s3_client", return_value=s3_client
         ):
             with pytest.raises(JobAttachmentsS3ClientError) as exc:
                 _get_tasks_manifests_keys_from_s3(
@@ -1795,8 +1787,7 @@ class TestFullDownload:
         )
 
         with stubber, patch(
-            f"{deadline.__package__}.job_attachments.download.get_s3_client",
-            return_value=s3_client,
+            f"{deadline.__package__}.job_attachments.download.get_s3_client", return_value=s3_client
         ), patch(f"{deadline.__package__}.job_attachments.download.Path.mkdir"):
             with pytest.raises(JobAttachmentsS3ClientError) as exc:
                 download_file(
@@ -1819,7 +1810,7 @@ class TestFullDownload:
                 "HTTP Status Code: 403, Forbidden or Access denied. "
             ) in str(exc.value)
             failed_file_path = Path("/home/username/assets/inputs/input1.txt")
-            assert (f"(Failed to download the file to {failed_file_path!s})") in str(exc.value)
+            assert (f"(Failed to download the file to {str(failed_file_path)})") in str(exc.value)
             mock_lock.assert_not_called()
             mock_collision_dict.assert_not_called()
 
@@ -2501,8 +2492,7 @@ def test_download_files_from_manifests(
         return (40, Path(args[0].path))
 
     with patch(
-        f"{deadline.__package__}.job_attachments.download.download_file",
-        side_effect=download_file,
+        f"{deadline.__package__}.job_attachments.download.download_file", side_effect=download_file
     ), patch(f"{deadline.__package__}.job_attachments.download.get_s3_client"):
         download_files_from_manifests(
             s3_bucket="s3_settings.s3BucketName",
@@ -2648,10 +2638,7 @@ def test_mount_vfs_from_manifests(
         )
 
         mock_write_manifest.assert_has_calls(
-            [
-                call(merged_decoded, dir=manifest_path),
-                call(merged_decoded, dir=manifest_path),
-            ]
+            [call(merged_decoded, dir=manifest_path), call(merged_decoded, dir=manifest_path)]
         )
         mock_vfs_start.assert_has_calls(
             [call(session_dir=temp_dir_path), call(session_dir=temp_dir_path)]

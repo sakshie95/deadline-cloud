@@ -15,44 +15,51 @@ from itertools import chain
 from logging import Logger, LoggerAdapter, getLogger
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from threading import Lock
-from typing import Any, Callable, DefaultDict, Optional, Union
+from typing import Any, Callable, DefaultDict, List, Optional, Tuple, Union
 
 import boto3
 from boto3.s3.transfer import ProgressCallbackInvoker
 from botocore.client import BaseClient
 from botocore.exceptions import BotoCoreError, ClientError
 
-from ._aws.aws_clients import (
-    get_account_id,
-    get_s3_client,
-    get_s3_max_pool_connections,
-    get_s3_transfer_manager,
-)
-from ._utils import (
-    _get_long_path_compatible_path,
-    _is_relative_to,
-    _join_s3_paths,
-)
-from .asset_manifests.base_manifest import BaseAssetManifest
-from .asset_manifests.base_manifest import BaseManifestPath as RelativeFilePath
-from .asset_manifests.decode import decode_manifest
+from .asset_manifests.base_manifest import BaseAssetManifest, BaseManifestPath as RelativeFilePath
 from .asset_manifests.hash_algorithms import HashAlgorithm
+from .asset_manifests.decode import decode_manifest
 from .exceptions import (
     COMMON_ERROR_GUIDANCE_FOR_S3,
-    AssetSyncCancelledError,
     AssetSyncError,
+    AssetSyncCancelledError,
     JobAttachmentS3BotoCoreError,
-    JobAttachmentsError,
     JobAttachmentsS3ClientError,
-    MissingAssetRootError,
     PathOutsideDirectoryError,
+    JobAttachmentsError,
+    MissingAssetRootError,
 )
+from .vfs import (
+    VFSProcessManager,
+    VFS_CACHE_REL_PATH_IN_SESSION,
+    VFS_MANIFEST_FOLDER_IN_SESSION,
+    VFS_LOGS_FOLDER_IN_SESSION,
+    VFS_MANIFEST_FOLDER_PERMISSIONS,
+)
+
 from .models import (
     Attachments,
     FileConflictResolution,
     JobAttachmentS3Settings,
     ManifestPathGroup,
+)
+from .progress_tracker import (
+    DownloadSummaryStatistics,
+    ProgressReportMetadata,
+    ProgressStatus,
+    ProgressTracker,
+)
+from ._aws.aws_clients import (
+    get_account_id,
+    get_s3_client,
+    get_s3_max_pool_connections,
+    get_s3_transfer_manager,
 )
 from .os_file_permission import (
     FileSystemPermissionSettings,
@@ -61,19 +68,12 @@ from .os_file_permission import (
     _set_fs_group_for_posix,
     _set_fs_permission_for_windows,
 )
-from .progress_tracker import (
-    DownloadSummaryStatistics,
-    ProgressReportMetadata,
-    ProgressStatus,
-    ProgressTracker,
+from ._utils import (
+    _get_long_path_compatible_path,
+    _is_relative_to,
+    _join_s3_paths,
 )
-from .vfs import (
-    VFS_CACHE_REL_PATH_IN_SESSION,
-    VFS_LOGS_FOLDER_IN_SESSION,
-    VFS_MANIFEST_FOLDER_IN_SESSION,
-    VFS_MANIFEST_FOLDER_PERMISSIONS,
-    VFSProcessManager,
-)
+from threading import Lock
 
 download_logger = getLogger("deadline.job_attachments.download")
 
@@ -91,7 +91,7 @@ def get_manifest_from_s3(
 
 def get_asset_root_and_manifest_from_s3(
     manifest_key: str, s3_bucket: str, session: Optional[boto3.Session] = None
-) -> tuple[Optional[str], BaseAssetManifest]:
+) -> Tuple[Optional[str], BaseAssetManifest]:
     asset_root, _, asset_manifest = _get_asset_root_and_manifest_from_s3_with_last_modified(
         manifest_key, s3_bucket, session
     )
@@ -100,7 +100,7 @@ def get_asset_root_and_manifest_from_s3(
 
 def _get_asset_root_and_manifest_from_s3_with_last_modified(
     manifest_key: str, s3_bucket: str, session: Optional[boto3.Session] = None
-) -> tuple[Optional[str], datetime, BaseAssetManifest]:
+) -> Tuple[Optional[str], datetime, BaseAssetManifest]:
     """
     Gets manifest with its asset root and last modified from s3 using the manifest key in s3
     :param manifest_key: key for searching in s3
@@ -147,7 +147,7 @@ def _get_asset_root_and_manifest_from_s3_with_last_modified(
             status_code=status_code,
             bucket_name=s3_bucket,
             key_or_prefix=manifest_key,
-            message=f"{status_code_guidance.get(status_code, '')} {exc!s}",
+            message=f"{status_code_guidance.get(status_code, '')} {str(exc)}",
         ) from exc
     except BotoCoreError as bce:
         raise JobAttachmentS3BotoCoreError(
@@ -209,12 +209,12 @@ def _get_tasks_manifests_keys_from_s3(
     session: Optional[boto3.Session] = None,
     *,
     select_latest_per_task=True,
-) -> list[str]:
+) -> List[str]:
     """
     Returns the keys of all output manifests from the given s3 prefix.
     (Only the manifests that end with the prefix pattern task-*/*_output)
     """
-    manifests_keys: list[str] = []
+    manifests_keys: List[str] = []
     s3_client = get_s3_client(session=session)
     try:
         paginator = s3_client.get_paginator("list_objects_v2")
@@ -254,7 +254,7 @@ def _get_tasks_manifests_keys_from_s3(
             status_code=status_code,
             bucket_name=s3_bucket,
             key_or_prefix=manifest_prefix,
-            message=f"{status_code_guidance.get(status_code, '')} {exc!s}",
+            message=f"{status_code_guidance.get(status_code, '')} {str(exc)}",
         ) from exc
     except BotoCoreError as bce:
         raise JobAttachmentS3BotoCoreError(
@@ -270,8 +270,7 @@ def _get_tasks_manifests_keys_from_s3(
         # 2. Select all files in the last subfolder (alphabetically) under each "task-{any}" folder.
         for task_folder, files in task_prefixes.items():
             last_subfolder = sorted(
-                set(f.split("/")[len(task_folder.split("/"))] for f in files),
-                reverse=True,
+                set(f.split("/")[len(task_folder.split("/"))] for f in files), reverse=True
             )[0]
             manifests_keys += [f for f in files if f.startswith(f"{task_folder}/{last_subfolder}/")]
     else:
@@ -515,7 +514,7 @@ def download_file(
     modified_time_override: Optional[float] = None,
     progress_tracker: Optional[ProgressTracker] = None,
     file_conflict_resolution: Optional[FileConflictResolution] = FileConflictResolution.CREATE_COPY,
-) -> tuple[int, Optional[Path]]:
+) -> Tuple[int, Optional[Path]]:
     """
     Downloads a file from the S3 bucket to the local directory. `modified_time_override` is ignored if the manifest
     version used supports timestamps.
@@ -619,7 +618,7 @@ def download_file(
                 status_code=status_code,
                 bucket_name=s3_bucket,
                 key_or_prefix=s3_key,
-                message=f"{status_code_guidance.get(status_code, '')} {exc!s} (Failed to download the file to {local_file_path!s})",
+                message=f"{status_code_guidance.get(status_code, '')} {str(exc)} (Failed to download the file to {str(local_file_path)})",
             ) from exc
 
         # TODO: Temporary to prevent breaking backwards-compatibility; if file not found, try again without hash alg postfix
@@ -653,14 +652,14 @@ def download_file(
     except Exception as e:
         raise AssetSyncError(e) from e
 
-    download_logger.debug(f"Downloaded {file.path} to {local_file_path!s}")
+    download_logger.debug(f"Downloaded {file.path} to {str(local_file_path)}")
     os.utime(local_file_path, (modified_time_override, modified_time_override))  # type: ignore[arg-type]
 
     return (file_bytes, local_file_path)
 
 
 def _download_files_parallel(
-    files: list[RelativeFilePath],
+    files: List[RelativeFilePath],
     hash_algorithm: HashAlgorithm,
     num_download_workers: int,
     local_download_dir: str,
@@ -768,14 +767,7 @@ def get_job_output_paths_by_asset_root(
     Returns a dict of ManifestPathGroups, with the root path as the key.
     """
     output_manifests_by_root = get_output_manifests_by_asset_root(
-        s3_settings,
-        farm_id,
-        queue_id,
-        job_id,
-        step_id,
-        task_id,
-        session_action_id,
-        session=session,
+        s3_settings, farm_id, queue_id, job_id, step_id, task_id, session_action_id, session=session
     )
 
     outputs: dict[str, ManifestPathGroup] = {}
@@ -816,10 +808,7 @@ def get_output_manifests_by_asset_root(
     with concurrent.futures.ThreadPoolExecutor(max_workers=S3_DOWNLOAD_MAX_CONCURRENCY) as executor:
         futures = [
             executor.submit(
-                get_asset_root_and_manifest_from_s3,
-                key,
-                s3_settings.s3BucketName,
-                session,
+                get_asset_root_and_manifest_from_s3, key, s3_settings.s3BucketName, session
             )
             for key in manifests_keys
         ]
@@ -836,9 +825,9 @@ def get_output_manifests_by_asset_root(
 
 def _get_output_manifest_files_by_asset_root_with_last_modified(
     s3_settings: JobAttachmentS3Settings,
-    output_manifest_paths: list[str],
+    output_manifest_paths: List[str],
     session: Optional[boto3.Session] = None,
-) -> list[tuple[str, datetime, BaseAssetManifest]]:
+) -> list[Tuple[str, datetime, BaseAssetManifest]]:
     """
     For a given list of output manifest paths, returns a list of tuples containing
     (asset_root, last_modified, manifest) that exactly mirrors the provided output_manifest_paths.
@@ -847,7 +836,7 @@ def _get_output_manifest_files_by_asset_root_with_last_modified(
         A list of tuples containing (asset_root, last_modified, manifest) in the same order as
         the provided output_manifest_paths.
     """
-    outputs: list[tuple[str, datetime, BaseAssetManifest]] = [None] * len(output_manifest_paths)  # type: ignore[list-item]
+    outputs: List[Tuple[str, datetime, BaseAssetManifest]] = [None] * len(output_manifest_paths)  # type: ignore[list-item]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=S3_DOWNLOAD_MAX_CONCURRENCY) as executor:
         # Submit all tasks and store futures in a list that preserves the original order
@@ -992,9 +981,7 @@ def _set_fs_group(
         )
 
 
-def merge_asset_manifests(
-    manifests: list[BaseAssetManifest],
-) -> BaseAssetManifest | None:
+def merge_asset_manifests(manifests: list[BaseAssetManifest]) -> BaseAssetManifest | None:
     """Merge files from multiple manifests into a single list, ensuring that each filename
     is unique by keeping the one from the last encountered manifest. (Thus, the steps'
     outputs are downloaded over the input job attachments.)
@@ -1043,7 +1030,7 @@ def merge_asset_manifests(
 
 
 def _merge_asset_manifests_sorted_asc_by_last_modified(
-    manifests_with_last_modified_timestamps: list[tuple[datetime, BaseAssetManifest]],
+    manifests_with_last_modified_timestamps: list[Tuple[datetime, BaseAssetManifest]],
 ) -> BaseAssetManifest | None:
     """Merge files from multiple manifests into a single list, sorting them by last modified timestamp asc.
     This function first sorts the manifests by their timestamps (oldest first) and then merges them,
@@ -1076,11 +1063,7 @@ def _merge_asset_manifests_sorted_asc_by_last_modified(
 
 def _write_manifest_to_temp_file(manifest: BaseAssetManifest, dir: Path) -> str:
     with NamedTemporaryFile(
-        suffix=".json",
-        prefix="deadline-merged-manifest-",
-        delete=False,
-        mode="w",
-        dir=dir,
+        suffix=".json", prefix="deadline-merged-manifest-", delete=False, mode="w", dir=dir
     ) as file:
         file.write(manifest.encode())
         return file.name
@@ -1232,6 +1215,7 @@ def _ensure_paths_within_directory(root_path: str, paths_relative_to_root: list[
             raise PathOutsideDirectoryError(
                 f"The provided path is not under the root directory: {path}"
             )
+    return
 
 
 class OutputDownloader:
