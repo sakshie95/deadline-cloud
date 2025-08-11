@@ -54,6 +54,8 @@ from deadline.job_attachments.download import (
     VFS_MANIFEST_FOLDER_IN_SESSION,
     VFS_MANIFEST_FOLDER_PERMISSIONS,
     VFS_LOGS_FOLDER_IN_SESSION,
+    WINDOWS_MAX_PATH_LENGTH,
+    TEMP_DOWNLOAD_ADDED_CHARS_LENGTH,
 )
 from deadline.job_attachments.exceptions import (
     AssetSyncError,
@@ -2070,14 +2072,12 @@ class TestFullDownload:
         copy_file = Path(base_dir) / f"{long_base_name} (1).txt"
 
         # Verify our test scenario is correct
-        original_len = len(str(original_file)) + 9
-        copy_len = len(str(copy_file)) + 9
-        assert original_len < 260, f"Original should NOT be long path: {original_len}"
-        assert copy_len >= 260, f"Copy should become long path: {copy_len}"
-
-        # Create the original file to force a conflict
-        original_file.parent.mkdir(parents=True, exist_ok=True)
-        original_file.write_text("original content")
+        original_len = len(str(original_file)) + TEMP_DOWNLOAD_ADDED_CHARS_LENGTH
+        copy_len = len(str(copy_file)) + TEMP_DOWNLOAD_ADDED_CHARS_LENGTH
+        assert original_len < WINDOWS_MAX_PATH_LENGTH, (
+            f"Original should NOT be long path: {original_len}"
+        )
+        assert copy_len >= WINDOWS_MAX_PATH_LENGTH, f"Copy should become long path: {copy_len}"
 
         # Create test file path object for the manifest
         file_path = ManifestPathv2023_03_03(
@@ -2146,7 +2146,10 @@ class TestFullDownload:
 
                 # Verify the underlying path length that triggered the conversion
                 underlying_path = fileobj_path.replace("\\\\?\\", "")
-                assert len(underlying_path) + 9 >= 260, (
+                assert (
+                    len(underlying_path) + TEMP_DOWNLOAD_ADDED_CHARS_LENGTH
+                    >= WINDOWS_MAX_PATH_LENGTH
+                ), (
                     f"The underlying path + temp chars should be at/over Windows limit: {len(underlying_path) + 9}"
                 )
             else:
@@ -2196,6 +2199,9 @@ class TestFullDownload:
         """
         Test that CREATE_COPY conflict resolution works correctly on POSIX systems
         with long filenames and actually downloads the file.
+
+        The variables have been decided such that they cross the max path length of 260
+        They are different for MacOS and Linux because of different temp directory lengths
         """
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
