@@ -2,12 +2,12 @@
 
 """
 Job template utilities for incremental download tests.
-Uses local copies of job templates from BealineJobBundles.
 """
 
 import re
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 
 def get_job_bundle_path(template_name: str) -> str:
@@ -30,10 +30,7 @@ def get_job_bundle_path(template_name: str) -> str:
 
 
 def submit_job_bundle(
-    farm_id: str,
-    queue_id: str,
-    template_name: str,
-    parameters: dict = None
+    farm_id: str, queue_id: str, template_name: str, parameters: Optional[dict] = None
 ) -> str:
     """
     Submit a job using a local job bundle template.
@@ -50,11 +47,7 @@ def submit_job_bundle(
     bundle_path = get_job_bundle_path(template_name)
 
     # Build the command
-    cmd = [
-        "deadline", "bundle", "submit",
-        "--farm-id", farm_id,
-        "--queue-id", queue_id
-    ]
+    cmd = ["deadline", "bundle", "submit", "--farm-id", farm_id, "--queue-id", queue_id]
 
     # Add parameters if provided
     if parameters:
@@ -67,7 +60,9 @@ def submit_job_bundle(
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
     if result.returncode != 0:
-        raise Exception(f"Failed to submit job: {result.stderr}\nCommand: {' '.join(cmd)}\nOutput: {result.stdout}")
+        raise Exception(
+            f"Failed to submit job: {result.stderr}\nCommand: {' '.join(cmd)}\nOutput: {result.stdout}"
+        )
 
     # Extract job ID from output
     output = result.stdout
@@ -84,7 +79,7 @@ def submit_make_many_small_files_job(
     queue_id: str,
     files_per_task: int = 100,
     task_count: int = 100,
-    output_dir: str = "output"
+    output_dir: str = "output",
 ) -> str:
     """
     Submit a job that creates many small files.
@@ -99,19 +94,13 @@ def submit_make_many_small_files_job(
     Returns:
         The job ID of the submitted job
     """
-    parameters = {
-        "FilesPerTask": files_per_task,
-        "Tasks": f"1-{task_count}",
-        "DataDir": output_dir
-    }
+    parameters = {"FilesPerTask": files_per_task, "Tasks": f"1-{task_count}", "DataDir": output_dir}
 
     return submit_job_bundle(farm_id, queue_id, "make_many_small_files", parameters)
 
 
 def submit_dep_data_flow_job(
-    farm_id: str,
-    queue_id: str,
-    output_dir: str = None
+    farm_id: str, queue_id: str, data_dir: Optional[str] = None, input_dir: Optional[str] = None
 ) -> str:
     """
     Submit a job with branching and merging step dependencies.
@@ -119,70 +108,42 @@ def submit_dep_data_flow_job(
     Args:
         farm_id: The farm ID to use
         queue_id: The queue ID to use
-        output_dir: The output directory to use (optional, not used - kept for compatibility)
+        data_dir: The data directory to use (optional, defaults to ./data_dir)
+        input_dir: The input directory to use (optional, defaults to ./input_dir)
 
     Returns:
         The job ID of the submitted job
     """
-    # Note: We don't override DataDir because the template expects it to point to
-    # the existing ./data_dir directory in the bundle which contains the required input files
-    parameters = {
-        "JobName": "Step-Step Dependency Test",
-        # DataDir uses default ./data_dir from template
-        # InputDir uses default ./input_dir from template
-        "Frames": "8-11"
-    }
+    parameters = {"JobName": "Step-Step Dependency Test", "Frames": "8-11"}
+
+    # Override DataDir if provided, otherwise use default ./data_dir from template
+    if data_dir:
+        parameters["DataDir"] = data_dir
+
+    # Override InputDir if provided, otherwise use default ./input_dir from template
+    if input_dir:
+        parameters["InputDir"] = input_dir
 
     return submit_job_bundle(farm_id, queue_id, "dep_data_flow", parameters)
 
 
-def submit_dep_chain_job(
-    farm_id: str,
-    queue_id: str
-) -> str:
+def submit_dep_chain_job(farm_id: str, queue_id: str, output_dir: str = "output") -> str:
     """
     Submit a job with a chain of step dependencies.
 
     Args:
         farm_id: The farm ID to use
         queue_id: The queue ID to use
+        output_dir: The output directory to use
 
     Returns:
         The job ID of the submitted job
+        :param output_dir:
     """
     parameters = {
         "JobName": "Step-Step Chain JA Output Test",
-        "OutputPath": "output",
+        "OutputPath": output_dir,
         # JobScriptDir uses default "scripts" from template
     }
 
     return submit_job_bundle(farm_id, queue_id, "dep_chain", parameters)
-
-
-def submit_cli_job(
-    farm_id: str,
-    queue_id: str,
-    bash_script: str,
-    data_dir: str = None
-) -> str:
-    """
-    Submit a job with a custom bash script.
-
-    Args:
-        farm_id: The farm ID to use
-        queue_id: The queue ID to use
-        bash_script: The bash script to execute
-        data_dir: The data directory to use (optional, defaults to "output")
-
-    Returns:
-        The job ID of the submitted job
-    """
-    if data_dir is None:
-        data_dir = "output"
-
-    parameters = {
-        "DataDir": data_dir,
-        "BashScript": bash_script
-    }
-
-    return submit_job_bundle(farm_id, queue_id, "cli_job", parameters)
