@@ -11,21 +11,21 @@ from deadline.client.api._submit_job_bundle import create_job_from_job_bundle
 from deadline.client.config import config_file
 
 
-def get_job_bundle_path(template_name: str) -> str:
+def get_job_bundle_path(name: str) -> str:
     """
-    Get the path to a job bundle template directory.
+    Get the path to a job bundle directory.
 
     Args:
-        template_name: Name of the template (e.g., 'make_many_small_files')
+        name: Name of the bundle (e.g., 'make_many_small_files')
 
     Returns:
-        Path to the template directory
+        Path to the job bundle directory
     """
     current_dir = Path(__file__).parent
-    bundle_path = current_dir / "job_bundles" / template_name
+    bundle_path = current_dir / "job_bundles" / name
 
     if not bundle_path.exists():
-        raise FileNotFoundError(f"Job bundle template not found: {bundle_path}")
+        raise FileNotFoundError(f"Job bundle not found: {bundle_path}")
 
     return str(bundle_path)
 
@@ -54,8 +54,8 @@ def submit_job_bundle(
 
     # Set farm and queue in config
     config = config_file.read_config()
-    config.set("defaults", "farm_id", farm_id)
-    config.set("defaults", "queue_id", queue_id)
+    config_file.set_setting("defaults.farm_id", farm_id, config)
+    config_file.set_setting("defaults.queue_id", queue_id, config)
 
     return create_job_from_job_bundle(
         job_bundle_dir=bundle_path, job_parameters=job_parameters, config=config

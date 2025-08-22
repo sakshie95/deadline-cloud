@@ -44,8 +44,8 @@ class IncrementalDownloadTest:
                 max_poll_interval=poll_interval,
             )
             return result.status == "SUCCEEDED", result.status
-        except Exception:
-            return False, "TIMEOUT"
+        except Exception as e:
+            return False, f"TIMEOUT! Received downstream exception: {e}"
 
     def run_incremental_download_without_storage_profiles(
         self,
