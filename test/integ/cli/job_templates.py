@@ -4,10 +4,11 @@
 Job template utilities for incremental download tests.
 """
 
-import re
-import subprocess
 from pathlib import Path
 from typing import Optional
+
+from deadline.client.api._submit_job_bundle import create_job_from_job_bundle
+from deadline.client.config import config_file
 
 
 def get_job_bundle_path(template_name: str) -> str:
@@ -46,32 +47,19 @@ def submit_job_bundle(
     """
     bundle_path = get_job_bundle_path(template_name)
 
-    # Build the command
-    cmd = ["deadline", "bundle", "submit", "--farm-id", farm_id, "--queue-id", queue_id]
-
-    # Add parameters if provided
+    # Convert parameters to the format expected by create_job_from_job_bundle
+    job_parameters = []
     if parameters:
-        for key, value in parameters.items():
-            cmd.extend(["--parameter", f"{key}={value}"])
+        job_parameters = [{"name": key, "value": value} for key, value in parameters.items()]
 
-    # Add the bundle path
-    cmd.append(bundle_path)
+    # Set farm and queue in config
+    config = config_file.read_config()
+    config.set("defaults", "farm_id", farm_id)
+    config.set("defaults", "queue_id", queue_id)
 
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-    if result.returncode != 0:
-        raise Exception(
-            f"Failed to submit job: {result.stderr}\nCommand: {' '.join(cmd)}\nOutput: {result.stdout}"
-        )
-
-    # Extract job ID from output
-    output = result.stdout
-    # Look for job ID at the end of the output (format: job-xxxxxxxx)
-    match = re.search(r"job-([a-zA-Z0-9]+)", output)
-    if not match:
-        raise Exception(f"Could not find job ID in output: {output}")
-
-    return match.group(0)  # Return the full job ID including "job-" prefix
+    return create_job_from_job_bundle(
+        job_bundle_dir=bundle_path, job_parameters=job_parameters, config=config
+    )
 
 
 def submit_make_many_small_files_job(
