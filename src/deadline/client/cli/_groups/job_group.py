@@ -43,6 +43,7 @@ from ... import api
 from ...config import config_file
 from ...exceptions import DeadlineOperationError, DeadlineOperationTimedOut
 from .._common import _apply_cli_options_to_config, _cli_object_repr, _handle_error
+from .._main import main
 from ._sigint_handler import SigIntHandler
 
 logger = logging.getLogger("deadline.client.cli")
@@ -86,7 +87,7 @@ def _format_timestamp(timestamp: datetime.datetime, use_local_time: bool = False
 sigint_handler = SigIntHandler()
 
 
-@click.group(name="job")
+@main.group(name="job")
 @_handle_error
 def cli_job():
     """
@@ -609,6 +610,7 @@ def _get_download_summary_message(
         return _get_json_line(
             JSON_MSG_TYPE_SUMMARY,
             f"Downloaded {download_summary.processed_files} files",
+            extra_properties={"fileCount": download_summary.processed_files},
         )
     else:
         paths_joined = "\n        ".join(
@@ -649,8 +651,15 @@ def _get_conflicting_filenames(filenames_by_root: dict[str, list[str]]) -> list[
     return conflicting_filenames
 
 
-def _get_json_line(messageType: str, value: Union[str, list[str], dict[str, Any]]) -> str:
-    return json.dumps({"messageType": messageType, "value": value}, ensure_ascii=True)
+def _get_json_line(
+    messageType: str,
+    value: Union[str, list[str], dict[str, Any]],
+    extra_properties: Optional[dict[str, Any]] = None,
+) -> str:
+    json_obj = {"messageType": messageType, "value": value}
+    if extra_properties:
+        json_obj.update(extra_properties)
+    return json.dumps(json_obj, ensure_ascii=True)
 
 
 def _get_value_from_json_line(
